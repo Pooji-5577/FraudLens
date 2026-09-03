@@ -1,0 +1,10 @@
+.venv/
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+data/transactions.csv
+models/*.joblib
+reports/metrics/*.json
+reports/metrics/*.csv
+reports/figures/*.png
