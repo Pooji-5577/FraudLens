@@ -1,19 +1,32 @@
 """FastAPI wrapper around the stateful fraud scorer."""
 
 from datetime import datetime
+import json
+import os
+from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 import pandas as pd
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
 
-from src.score import FraudScorer
-from src.report import (
+from backend.src.score import FraudScorer
+from backend.src.razorpay_enforcement import ReviewStore, verify_webhook_signature
+from backend.src.review_store import (
+    SupabaseReviewStore,
+    SupabaseStoreError,
+    review_store_from_environment,
+)
+from backend.src.report import (
     answer_preview_transaction_question,
     answer_transaction_question,
     generate_demo_report,
     generate_report,
 )
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(PROJECT_ROOT / ".env")
 
 app = FastAPI(title="Fraud Spike Detector", version="1.0.0")
 scorer = FraudScorer()
@@ -62,6 +75,64 @@ class DemoReportRequest(BaseModel):
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/health/storage")
+def storage_health() -> dict[str, str]:
+    """Verify the configured review-storage backend and Supabase schema."""
+    database_path = Path(
+        os.getenv("RAZORPAY_ENFORCEMENT_DB", "backend/data/razorpay_enforcement.sqlite3")
+    )
+    try:
+        store = review_store_from_environment(database_path)
+        if isinstance(store, SupabaseReviewStore):
+            store.healthcheck()
+            return {"status": "ok", "backend": "supabase"}
+        return {"status": "ok", "backend": "sqlite"}
+    except SupabaseStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/webhooks/razorpay", status_code=202)
+async def razorpay_webhook(request: Request) -> dict[str, Any]:
+    """Authenticate a Razorpay webhook before parsing or processing it."""
+    if os.getenv("RAZORPAY_MODE", "test").lower() != "test":
+        raise HTTPException(status_code=503, detail="Razorpay enforcement is restricted to Test Mode.")
+    raw_body = await request.body()
+    if not verify_webhook_signature(
+        raw_body,
+        request.headers.get("x-razorpay-signature"),
+        os.getenv("RAZORPAY_WEBHOOK_SECRET", ""),
+    ):
+        raise HTTPException(status_code=400, detail="Invalid Razorpay webhook signature.")
+    event_id = request.headers.get("x-razorpay-event-id")
+    if not event_id:
+        raise HTTPException(status_code=400, detail="Missing Razorpay webhook event ID.")
+    try:
+        payload = json.loads(raw_body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid Razorpay webhook payload.") from exc
+    database_path = Path(
+        os.getenv("RAZORPAY_ENFORCEMENT_DB", "backend/data/razorpay_enforcement.sqlite3")
+    )
+    store = getattr(app.state, "razorpay_enforcement", None)
+    storage_backend = os.getenv("FRAUDLENS_STORAGE", "sqlite").lower()
+    if storage_backend == "supabase":
+        if not isinstance(store, SupabaseReviewStore):
+            store = review_store_from_environment(database_path)
+    else:
+        if (
+            not isinstance(store, ReviewStore)
+            or getattr(store, "path", None) != database_path
+        ):
+            store = review_store_from_environment(database_path)
+    app.state.razorpay_enforcement = store
+    try:
+        return store.process_event(event_id, payload)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SupabaseStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.post("/score", response_model=ScoreResponse, response_model_exclude_none=True)

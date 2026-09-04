@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.features import MODEL_FEATURES
+from backend.src.features import MODEL_FEATURES
 
 
 def shap_contributions(model, matrix: pd.DataFrame) -> np.ndarray:

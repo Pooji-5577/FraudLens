@@ -8,13 +8,18 @@ from threading import Lock
 import joblib
 import pandas as pd
 
-from src.explain import explain_flagged
-from src.features import FeatureState, engineer_features, model_matrix
-from src.report import generate_report
+from backend.src.explain import explain_flagged
+from backend.src.features import FeatureState, engineer_features, model_matrix
+from backend.src.report import generate_report
 
 
 class FraudScorer:
-    def __init__(self, model_path: str | Path = "models/fraud_detector.joblib") -> None:
+    def __init__(
+        self,
+        model_path: str | Path = Path(__file__).resolve().parents[1]
+        / "models"
+        / "fraud_detector.joblib",
+    ) -> None:
         self.artifact = joblib.load(model_path)
         self.model = self.artifact["model"]
         self.explanation_model = self.artifact.get("explanation_model", self.model)

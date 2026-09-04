@@ -3,7 +3,7 @@ import pytest
 import json
 from pathlib import Path
 
-from src.evaluate import best_cost_threshold, metrics_at_threshold, sweep_thresholds
+from backend.src.evaluate import best_cost_threshold, metrics_at_threshold, sweep_thresholds
 
 
 def test_metrics_and_cost_are_counted_exactly():
@@ -32,7 +32,7 @@ def test_negative_cost_is_rejected():
 
 def test_readme_cost_matches_generated_evaluation():
     root = Path(__file__).resolve().parents[1]
-    evaluation = json.loads((root / "reports/metrics/evaluation.json").read_text())
+    evaluation = json.loads((root / "backend/reports/metrics/evaluation.json").read_text())
     chosen = evaluation["chosen"]
     expected = chosen["fn"] * evaluation["cost_fn"] + chosen["fp"] * evaluation["cost_fp"]
     assert chosen["total_cost"] == pytest.approx(expected)

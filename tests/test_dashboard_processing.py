@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -10,13 +11,16 @@ from pandas.testing import assert_frame_equal
 import pytest
 import requests
 
-from dashboard.processing import (
+from frontend.processing import (
     ask_preview_transaction_question,
     ask_transaction_question,
     cheapest_threshold_row,
     chronological_transactions,
     cost_curve_for_ratio,
+    csv_injection_safe,
+    demo_case_catalog,
     filter_transactions_by_date,
+    load_global_importance,
     load_threshold_curve,
     risk_audit_rows,
     risk_evidence_summary,
@@ -130,6 +134,24 @@ def test_risk_evidence_counts_errors_costs_and_audit_rows():
     }
 
 
+def test_demo_case_catalog_surfaces_every_synthetic_case():
+    transactions = pd.DataFrame([
+        {"payment_id": "low", "risk_score": .20, "risk_status": "Low risk", "actual": "Legitimate"},
+        {"payment_id": "review", "risk_score": .50, "risk_status": "Review", "actual": "Legitimate"},
+        {"payment_id": "high", "risk_score": .90, "risk_status": "High risk", "actual": "Fraud"},
+        {"payment_id": "fp", "risk_score": .80, "risk_status": "High risk", "actual": "Legitimate"},
+        {"payment_id": "fn", "risk_score": .10, "risk_status": "Low risk", "actual": "Fraud"},
+    ])
+
+    catalog = demo_case_catalog(transactions, threshold=.65)
+
+    assert catalog["Case"].tolist() == [
+        "Low risk / allowed", "Review band", "High risk / report", "False positive", "False negative"
+    ]
+    assert catalog["Rows"].tolist() == [2, 1, 2, 1, 1]
+    assert catalog["Example payment"].tolist() == ["low", "review", "high", "fp", "fn"]
+
+
 def test_dashboard_http_client_round_trips_through_fastapi():
     root = Path(__file__).resolve().parents[1]
     with socket.socket() as listener:
@@ -139,7 +161,16 @@ def test_dashboard_http_client_round_trips_through_fastapi():
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(root)
     process = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "api.main:app", "--host", "127.0.0.1", "--port", str(port)],
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "backend.api.main:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+        ],
         cwd=root,
         env=environment,
         stdout=subprocess.DEVNULL,
@@ -181,7 +212,7 @@ def test_dashboard_script_resolves_project_packages_from_its_own_directory():
                 "runpy.run_path('app.py', run_name='__main__')"
             ),
         ],
-        cwd=root / "dashboard",
+            cwd=root / "frontend",
         env=environment,
         text=True,
         capture_output=True,
@@ -288,6 +319,50 @@ def test_cost_curve_for_ratio_recomputes_total_cost_from_confusion_counts():
 def test_cost_curve_for_ratio_rejects_negative_costs():
     with pytest.raises(ValueError, match="non-negative"):
         cost_curve_for_ratio(_threshold_curve(), cost_fp=-1.0, cost_fn=500.0)
+
+
+def test_csv_injection_safe_escapes_formula_prefixed_cells():
+    frame = pd.DataFrame({
+        "order_id": ["=cmd|'/c calc'!A1", "+1-800-555", "-2+3", "@SUM(A1)", "order_normal"],
+        "email": ["safe@example.com", "\tattack", "\rattack", "plain", "another@example.com"],
+        "amount": [100.0, 200.0, 300.0, 400.0, 500.0],
+    })
+
+    safe = csv_injection_safe(frame)
+
+    assert safe["order_id"].tolist() == [
+        "'=cmd|'/c calc'!A1", "'+1-800-555", "'-2+3", "'@SUM(A1)", "order_normal",
+    ]
+    assert safe["email"].tolist() == ["safe@example.com", "'\tattack", "'\rattack", "plain", "another@example.com"]
+    assert safe["amount"].tolist() == [100.0, 200.0, 300.0, 400.0, 500.0]
+
+
+def test_csv_injection_safe_leaves_frame_without_risky_cells_unchanged():
+    frame = pd.DataFrame({"payment_id": ["pay_1", "pay_2"], "status": ["captured", "failed"]})
+
+    safe = csv_injection_safe(frame)
+
+    pd.testing.assert_frame_equal(safe, frame)
+
+
+def test_load_global_importance_sorts_signals_highest_first(tmp_path):
+    json_path = tmp_path / "global_feature_importance.json"
+    json_path.write_text(json.dumps({
+        "held_out_rows": 15000,
+        "signal_importance_percent": {"New device": 3.0, "Amount deviation": 42.4, "Time of day": 12.1},
+    }))
+
+    payload = load_global_importance(json_path)
+
+    assert list(payload["signal_importance_percent"]) == ["Amount deviation", "Time of day", "New device"]
+
+
+def test_load_global_importance_rejects_missing_signal_percentages(tmp_path):
+    json_path = tmp_path / "bad.json"
+    json_path.write_text(json.dumps({"held_out_rows": 15000}))
+
+    with pytest.raises(ValueError, match="signal_importance_percent"):
+        load_global_importance(json_path)
 
 
 def test_cheapest_threshold_row_picks_lowest_total_cost_for_the_ratio():

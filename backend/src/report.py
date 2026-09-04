@@ -9,12 +9,15 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 import requests
 
-# Loads AZURE_OPENAI_* from a local .env at the project root, if present.
+# Loads AZURE_OPENAI_* from the repository-root .env, if present.
 # Never overrides variables the process environment already set.
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+PROJECT_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+for _name, _value in dotenv_values(PROJECT_ENV_PATH).items():
+    if _name.startswith("AZURE_OPENAI_") and _value is not None:
+        os.environ.setdefault(_name, _value)
 
 
 SYSTEM_PROMPT = """You write short fraud-risk summaries for a non-technical merchant support reviewer.

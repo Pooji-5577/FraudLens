@@ -3,9 +3,14 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+supabase/.temp/
+backend/data/*.sqlite3
+backend/data/*.sqlite3-shm
+backend/data/*.sqlite3-wal
 
-# data/transactions.csv, models/fraud_detector.joblib, and reports/ are
+# backend/data/transactions.csv, backend/models/fraud_detector.joblib, and
+# backend/reports/ are
 # committed on purpose: they're the demo's checked-in trained model and
 # held-out evaluation artifacts, regenerable at any time with
-# `python -m src.train` (see README Quick start), so judges and deployment
+# `python -m backend.src.train` (see README Quick start), so judges and deployment
 # get a working app without a multi-minute training run first.

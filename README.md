@@ -1,201 +1,440 @@
-# Fraud Spike Detector
+# FraudLens
 
 [![tests](https://github.com/Pooji-5577/FraudLens/actions/workflows/tests.yml/badge.svg)](https://github.com/Pooji-5577/FraudLens/actions/workflows/tests.yml)
 
-An explainable, cost-aware fraud detector and merchant review workspace, with real Razorpay transaction connectivity for account review. Fraud scoring currently runs on a synthetic dataset engineered to include the signals that real-time scoring would need; connecting the trained model to enriched real Razorpay transactions is the next integration step.
+FraudLens is a human-in-the-loop payment risk review workspace built for the Razorpay Buildathon AI Risk Manager track. Most hackathon fraud detectors stop at a score; FraudLens explains every flagged synthetic decision in plain language and can generate a full reviewer-ready evidence report grounded in the exact signals behind that decision. The AI writes only the explanation—the score, reason codes, and evidence values remain deterministic and independently inspectable.
 
-Most fraud detectors stop at a score; FraudLens explains every flagged synthetic decision in plain language and can generate a full reviewer-ready evidence report grounded in the exact signals behind that decision. The AI writes only the explanation—the score, reason codes, and evidence values remain deterministic and independently inspectable.
+It combines:
 
-The two current paths are deliberately separate:
+- An explainable fraud model trained and evaluated on synthetic payment data.
+- A reviewer dashboard for inspecting transactions and evidence.
+- A safe, presentation-only payment enforcement walkthrough.
+- An optional Razorpay Test Mode integration for authorized-payment review, capture, and refund.
 
-- **Razorpay payment history:** read-only OAuth access loads real payment records for filtering, inspection, export, and transaction-grounded chat. These records are not scored by the fraud model.
-- **Synthetic risk system:** generated data includes card/device history, IP and billing geography, merchant category, and labels. That data powers model training, held-out evaluation, the scoring API, SHAP explanations, and the clearly labelled mock risk demonstration.
+FraudLens does **not** automatically capture, block, or refund a real payment. A human reviewer must make every payment decision.
 
-The scoring API's `blocked` field is an internal synthetic-policy decision. It does not decline, capture, refund, or otherwise change a Razorpay payment.
+## The project in one minute
 
-## Quick start
+```text
+Payment data
+    │
+    ├── Synthetic demo data ──> risk score ──> reasons and evidence
+    │                                      └─> human reviews the result
+    │
+    └── Razorpay Test Mode ──> authorized payment ──> review queue
+                                                   ├─> approve and capture
+                                                   ├─> withhold capture
+                                                   └─> refund if already captured
+```
 
-Python 3.11 is the supported runtime.
+The two branches are intentionally separate. Synthetic data contains the device, geography, velocity, history, and fraud-label fields required by the model. Razorpay's normal Payments API does not provide all of those fields, so FraudLens does not invent a score for real Razorpay payments.
+
+## What is real and what is simulated?
+
+| Area | Data | What happens |
+|---|---|---|
+| Mock dashboard | Generated payments | Demonstrates filtering, risk scores, evidence, reviewer actions, and audit entries. No Razorpay request is made. |
+| Fraud model | Reproducible synthetic dataset | Trains and evaluates a real XGBoost model using chronological, leakage-safe features. |
+| Optional Razorpay integration | Razorpay Test Mode only | Loads Test Mode payment records and supports explicit human-approved capture/refund actions. |
+| AI explanation | Deterministic evidence plus optional Azure OpenAI text | AI summarizes existing evidence. It cannot change the score or initiate a payment action. |
+
+> **Important:** The mock enforcement controls only change Streamlit session state. They never call Razorpay and never move money.
+
+## Dashboard tour
+
+The interface opens in demo mode and follows six focused views instead of one long page. The Review queue starts with a highlighted **Demo every case in one session** tour so a judge can see the entire product path without guessing where to click.
+
+### Complete demo path: all cases
+
+The deterministic mock dataset includes every labelled risk outcome: low-risk/allowed, review-band,
+high-risk/report, false-positive, and false-negative rows. Use the tour shortcuts in this order:
+
+1. **Inspect risk cases** to compare the five outcomes and their example payment IDs.
+2. **Open evidence report**, then click **Generate full evidence report**. This is the key moment:
+   an AI-written explanation is immediately followed by deterministic evidence values, so the demo
+   shows more than a score.
+3. **Open policy audit** for held-out metrics, the cost-of-fraud trade-off, global signal importance,
+   and the labelled decision audit.
+4. **Ask AI about a payment** to ask a grounded question about the visible row.
+5. **Score a transaction** to run the trained XGBoost model on a manually entered, signal-complete row
+   and ask AI about that saved score.
+6. Return to Review queue and exercise all three session-only enforcement outcomes: approve and capture,
+   withhold capture after confirming fraud, and refund a payment captured before review.
+7. Use the real-account path only to show payment-history review. Real Razorpay rows deliberately have
+   no model score or synthetic error label until the required enrichment signals are integrated.
+
+### Demo mode
+
+The workspace opens directly in a clearly labelled synthetic demo session. No Razorpay credentials are required for the walkthrough.
+
+### 1. Review queue
+
+Practice the payment decision using two scenarios:
+
+- **Authorized — awaiting review**
+  - **Approve & capture** changes the simulated status to `Captured`.
+  - **Confirm fraud & release authorization** changes it to `Capture withheld` and stops fulfillment.
+- **Captured before review**
+  - **Refund & stop fulfillment** changes the simulated status to `Refunded`.
+
+Every mock action immediately adds a session audit entry containing the reviewer, timestamp, payment ID, action, and resulting status.
+
+### 2. Score a transaction
+
+Enter one raw transaction manually and click **Run fraud model**. The frontend sends the record to the FastAPI `/score/batch` endpoint, where the trained XGBoost artifact computes a risk score and SHAP-backed reasons. The scored context is retained by the running backend so **Ask about this scored transaction** can give an Azure OpenAI explanation grounded in the same score and evidence.
+
+Required inputs are transaction ID, UTC timestamp, user ID, device ID, card ID, amount, billing country, IP country, and merchant category. Submit transactions in chronological order: each timestamp must be later than data already scored by that backend process.
+
+### 3. Transactions
+
+Browse generated or connected-account payments. You can:
+
+- Search by payment ID, order ID, email, or contact.
+- Filter by payment status, method, currency, and risk status.
+- Show only international payments.
+- Change the UTC date range.
+- Download the filtered table as CSV.
+- Generate a reviewer-ready evidence report for a high-risk synthetic transaction.
+
+Captured totals remain separated by currency; INR and USD are never added together as though they were interchangeable.
+
+### 4. Model insights
+
+Inspect held-out model results, cost-policy assumptions, global SHAP feature importance, and the synthetic decision audit. Changing the false-positive and false-negative cost sliders recalculates the cheapest operating threshold from saved held-out confusion counts.
+
+### 5. Ask about a payment
+
+Select a visible transaction and ask questions about its fields. The assistant uses only that transaction's supplied context and says when information is unavailable.
+
+### 6. Razorpay account
+
+The optional account view explains the real-data boundary and, when the Partner OAuth values are
+configured, starts a Test Mode OAuth connection. A connected account exposes payment history for
+review, filtering, export, and grounded chat; it does not receive a synthetic model score until the
+required enrichment signals are integrated.
+
+## Quick start: safe mock demo
+
+### Requirements
+
+- Python 3.11
+- macOS, Linux, or Windows with a Python environment
+- On macOS, XGBoost may require OpenMP: `brew install libomp`
+
+### 1. Create the environment
+
+Run these commands from the repository directory:
 
 ```bash
+cd fraud-spike-detector
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python -m src.train
-pytest
 ```
 
-Run those commands from this `fraud-spike-detector/` directory. `python -m src.train` uses a fixed seed, regenerates all 50,000 transactions, rebuilds features, and makes a chronological 70/30 split. Within the 70% training window, it fits 180 XGBoost candidates on the earliest 80% and selects by PR-AUC on the latest 20%. It then refits the winner on the full training window, compares four final candidates once on the untouched test window, deploys the PR-AUC winner, and runs threshold search and SHAP against that winner.
+For separate deployments, install `frontend/requirements.txt` in the Streamlit service and `backend/requirements.txt` in the FastAPI service. The root requirements file combines both and adds the test runner for local development.
 
-On macOS, XGBoost also needs the OpenMP runtime (`brew install libomp`, or `conda install llvm-openmp` in a Conda environment).
+Windows PowerShell activation:
 
-Start the API for the synthetic scoring endpoints and dashboard AI chat, then start the dashboard:
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+### 2. Start the API
 
 ```bash
-# Terminal 1: scoring service
-uvicorn api.main:app --reload
+python -m uvicorn backend.api.main:app --reload --port 8000
+```
 
-# Terminal 2: review dashboard
+API documentation will be available at [http://localhost:8000/docs](http://localhost:8000/docs).
+
+### 3. Start the dashboard
+
+Open another terminal in the same directory:
+
+```bash
 SCORING_API_URL=http://localhost:8000 \
-streamlit run dashboard/app.py
+streamlit run frontend/app.py --server.port 8501
 ```
 
-### Connect a Razorpay account
+Open [http://localhost:8501](http://localhost:8501); the synthetic demo workspace opens automatically.
 
-The dashboard is protected by Razorpay's authorization-code OAuth flow and requests
-read-only access. Create an application under **Partner Dashboard → Applications**, add
-the exact dashboard URL as a redirect URI, and set these server-side values:
+No Razorpay credential is required for this walkthrough.
+
+## Run the tests
+
+Run everything:
 
 ```bash
-export RAZORPAY_CLIENT_ID="your-development-or-production-client-id"
-export RAZORPAY_CLIENT_SECRET="your-client-secret"
-export RAZORPAY_REDIRECT_URI="http://localhost:8501"
-export RAZORPAY_MODE="test"  # use live with the production client
+python -m pytest -q
 ```
 
-After approval, the app exchanges the authorization code on the server and opens the
-payment-history dashboard. The Razorpay section supports an inclusive UTC date range and
-paginates through the matching payments. Production redirect URIs must use HTTPS. For local automated
-UI tests only, `RAZORPAY_AUTH_DISABLED=true` bypasses the connection gate; never enable
-that setting in a deployed environment. For demos that should retain the connection step,
-leave `RAZORPAY_MOCK_AUTH=true`: when Partner credentials are absent, the button opens a
-clearly labelled mock session without credentials or Razorpay account data. Set it to
-`false` to require real Razorpay configuration.
-
-`SCORING_API_URL` defaults to `http://localhost:8000` and can be changed for a remote service. The connected-account dashboard uses it for grounded transaction chat; it does not send real Razorpay payments to the trained scorer.
-
-The synthetic API scorer keeps prior transactions in memory so velocity and history features are point-in-time correct within a running process. Single requests must arrive in increasing timestamp order. `POST /score/batch` sorts each submitted batch chronologically before applying state, and equal-timestamp transactions cannot observe one another. Separate batches must still move forward in time. A fresh process starts with cold history, while a production service would hydrate state from a feature store.
-
-## From score to evidence report
-
-For a blocked transaction, the API can organize the exact scored feature values into a reviewer-facing evidence report. Python builds the evidence list directly from card/device velocity, country comparison, amount baseline, device history, and transaction recency. Azure OpenAI only writes the connecting 2–3 sentence summary; it cannot supply or modify evidence values. The prompt forbids speculation about customer identity, intent, or whether fraud occurred.
-
-In the synthetic dashboard walkthrough, choose a high-risk demo transaction and click **✨ Generate full evidence report**. This is the walkthrough's key moment: the UI moves from a bare score to an AI-written explanation, followed by the deterministic evidence that supports it. The same capability is available for transactions scored by the trained model through the report API; the mock dashboard labels its simplified demonstration signals separately.
-
-Use `.env.example` as a template and export these variables in the API process (or load your `.env` through your deployment platform):
-
-```bash
-export AZURE_OPENAI_API_KEY="..."
-export AZURE_OPENAI_ENDPOINT="https://your-resource-name.openai.azure.com"
-export AZURE_OPENAI_DEPLOYMENT_NAME="your-chat-model-deployment"
-export AZURE_OPENAI_API_VERSION="v1"
-```
-
-`AZURE_OPENAI_API_VERSION` defaults to the current stable `v1` Azure OpenAI API. No real credentials belong in the repository. Without complete Azure configuration, ordinary scoring is unchanged and the dashboard explains that narrative reports are unavailable. Provider timeouts are retried once; authentication, rate-limit, timeout, and other generation failures return the original score/flag/reasons normally and retain deterministic evidence with a safe failure status.
-
-Request a report during synthetic single-transaction scoring with `POST /score?include_report=true`, request a retained scored transaction with `POST /report/{transaction_id}`, or generate the clearly labelled mock walkthrough report with `POST /demo-report`. Scores below the saved threshold are marked for monitoring; scores at or above it return `blocked: true` and `recommended_action: auto-block`. These values describe the synthetic policy simulation only and do not enforce any action in Razorpay.
-
-Example report shape:
-
-```json
-{
-  "status": "generated",
-  "summary": "This payment was sent for review because recent card activity was elevated and its billing and IP countries differed. The amount also differed materially from the customer's prior spending baseline.",
-  "evidence": [
-    {
-      "signal": "card_velocity",
-      "detail": "20 earlier card transactions in 1 hour; 20 in 24 hours.",
-      "values": {"count_1h": 20, "count_24h": 20}
-    },
-    {
-      "signal": "geography",
-      "detail": "Billing country IN and IP country RU do not match.",
-      "values": {"billing_country": "IN", "ip_country": "RU", "mismatch": true}
-    }
-  ],
-  "confidence_note": "This is a model-generated risk assessment for human review, not a determination of fraud.",
-  "recommended_action": "auto-block"
-}
-```
-
-The summary text is AI-generated and exists only to assist a human reviewer. It does not trigger the block, replace human judgment, establish customer intent, or provide chargeback proof by itself. This layer only narrates detector evidence and provides no fraud-evasion guidance.
-
-## Transaction-aware AI chat
-
-In the dashboard, **Ask AI about a transaction** answers only from the selected row's visible Razorpay payment fields. For real account payments it explicitly has no fraud score or decision. The synthetic scoring API can separately answer questions about an already-scored synthetic transaction using its score, threshold, reasons, and deterministic evidence. Chat requests retain at most eight recent messages.
-
-The assistant is instructed to answer only from that context and to say when the requested information is unavailable. Transaction values are treated as untrusted data rather than instructions. The question and selected transaction context are sent to the configured Azure OpenAI service, so production deployments should apply their normal data-governance and retention controls.
-
-## Detection logic
-
-Every feature is computed from transactions with a timestamp strictly earlier than the row being scored. Transactions at identical timestamps cannot observe one another. Signals include card/device counts over 1-hour and 24-hour windows, billing/IP country mismatch, deviation from the user's prior amount mean and standard deviation, first-seen device status, and time since the user's prior transaction.
-
-Raw labels remain imbalanced at roughly 1–2%. Exactly 2.5% of labels are flipped: 2.1 percentage points model delayed or missed fraud reports (false negatives), while 0.4 points model disputed legitimate payments recorded as fraud (false positives). This asymmetric noise preserves the requested observed prevalence. Training handles imbalance with `scale_pos_weight`; it never oversamples rows.
-
-## Held-out results
-
-The headline metrics below are populated after the verified 50,000-row run. They are calculated only on the most recent 30% of transactions, never on the training rows.
-
-- Production model: **tuned, uncalibrated XGBoost**
-- Chosen threshold: **0.26**
-- Precision: **13.35%**
-- Recall: **76.61%**
-- F1: **22.74%**
-- Brier score: **0.0462**
-- PR-AUC: **0.2982**
-- ROC-AUC: **0.8549**
-
-At that threshold the 15,000-row held-out window contained 226 true positives, 1,467 false positives, 13,238 true negatives, and 69 false negatives. The low precision is reported deliberately rather than hidden: under the illustrative 100:1 missed-fraud/review cost ratio, the cheapest policy accepts a large review queue to recover more fraud.
-
-### Why precision looks low
-
-At the current 100:1 false-negative-to-false-positive cost ratio, 13.35% precision means roughly **87 of every 100 blocked transactions are false alarms**. This is a deliberate consequence of prioritizing catching fraud over minimizing customer friction, not a modeling failure. Adjusting the cost ratio in `src/evaluate.py` and rerunning threshold search moves the policy toward higher precision at the cost of missing more fraud; for example, the existing curve reaches 40.00% precision and 48.14% recall at threshold 0.81.
-
-The cost model uses **$5 per false positive** (an illustrative blocked-payment friction cost) and **$500 per false negative** (a conservative illustrative average loss from an undetected fraudulent payment). At the selected threshold, total held-out cost is **$41,835**. These are explicit policy assumptions, not universal values. Change them in `src/evaluate.py` for a different operating context and retrain before deployment. Because the PR-AUC winner is uncalibrated, its score is an operating score rather than a literal fraud probability; this is reflected by its weaker Brier score.
-
-Artifacts are written to `reports/metrics/evaluation.json`, `reports/metrics/threshold_curve.csv`, and plots for cost, precision/recall/F1, PR/ROC ranking, calibration, and model comparison under `reports/figures/`. The audit trail includes `model_comparison_initial.*`, `xgboost_calibration_impact_initial.json`, `xgboost_temporal_search.*`, and `model_comparison_tuned.*`.
-
-### Fair XGBoost tuning and second comparison
-
-The first comparison evaluated only calibrated, lightly tuned XGBoost. Re-evaluating that original model before calibration produced PR-AUC **0.2870** / ROC-AUC **0.8312**, versus **0.2657** / **0.8360** after isotonic calibration. Calibration improved ROC-AUC slightly, but its tied score levels reduced PR-AUC; ranking and probability trust are different objectives.
-
-The second comparison searched all 180 combinations of three `scale_pos_weight` multipliers, five depths, three estimator counts, and four learning rates. Search used only the nested temporal validation window and optimized PR-AUC. The winning validation configuration used `scale_pos_weight=28.85` (`0.5×` the contemporaneous class ratio), `max_depth=3`, `n_estimators=300`, and `learning_rate=0.05`. After selection, the class-weight multiplier was reapplied to the full training ratio (`scale_pos_weight=28.43`) and XGBoost was refit on all training rows.
-
-Every row below uses the same point-in-time features, full 70% training period, and newest untouched 30% test period. No model uses SMOTE or random splitting.
-
-| Model | PR-AUC | ROC-AUC |
-|---|---:|---:|
-| Tuned XGBoost, uncalibrated | **0.2982** | 0.8549 |
-| Tuned XGBoost, calibrated | 0.2891 | **0.8554** |
-| Random forest | 0.2873 | 0.8466 |
-| Logistic regression | 0.2683 | 0.8497 |
-
-Tuned, uncalibrated XGBoost is the production pick because it has the highest held-out PR-AUC, the selection metric most sensitive to false-positive burden under severe imbalance. The calibrated variant remains available in the comparison for applications that value probability interpretation more than the small ranking loss. The original and tuned comparisons are both retained under `reports/metrics/` and `reports/figures/`.
-
-## Explanations
-
-Blocked rows receive the three largest positive SHAP contributors translated into reviewer language, such as recent card velocity, country inconsistency, an amount far outside prior spending, or a first-seen device. The numeric score and reason codes preserve evidence for review; they are not a claim that a customer committed fraud.
-
-## Known limitations
-
-- Real Razorpay payments are shown for account review but are not scored by the trained model; the Payments API does not provide all required device, IP-geography, identity, and history signals.
-- Razorpay webhooks are not integrated. The dashboard reads payment history through the Payments API.
-- No live Razorpay payment is blocked, declined, captured, or refunded by this project.
-- Real fraud outcomes are not learned from Razorpay disputes; model labels are synthetic.
-- OAuth `state` is kept in process memory. This is sufficient for a single demo process, but production needs durable user-bound state and multi-worker-safe storage.
-- Slow-drip fraud that stays below velocity signals and resembles ordinary spend may be missed.
-- A genuinely travelling customer, a VPN, shared cards, or a new phone can resemble risk and create false positives.
-- Cold-start users have no reliable spending baseline; the API also needs a persistent feature store across restarts in production.
-- Synthetic performance will not transfer directly to real payment traffic, which changes over time and needs drift, fairness, compliance, and model-risk monitoring.
-- The cost-optimal threshold is selected on this demo's held-out set. A production launch should freeze policy on a validation window, then report once on a later untouched test window.
-
-## Project layout
+Expected result for the current repository:
 
 ```text
-data/generate_synthetic.py  reproducible defensive dataset generator
-src/features.py             leakage-safe chronological features
-src/tune.py                 180-candidate temporal XGBoost search
-src/benchmark.py            fair four-model comparison and artifacts
-src/calibration.py          out-of-time isotonic score calibration
-src/train.py                temporal split, winner selection, and training
-src/evaluate.py             metrics, calibration, and cost curve
-src/explain.py              SHAP contributions and reason codes
-src/score.py                stateful single/batch scoring
-api/main.py                 POST /score and POST /score/batch
-dashboard/app.py            Razorpay payment-history and synthetic mock-review interface
-tests/                      leakage and metric sanity tests
+79 passed
 ```
 
-## Structural reference
+Run only the dashboard tests:
 
-The pipeline shape and cost/calibration reporting were informed by [Financial Fraud Risk Engine](https://github.com/AmirhosseinHonardoust/Financial-Fraud-Risk-Engine). The idea of including a multi-model benchmark and broader evaluation visuals was prompted by [Arindam-GitH/FraudGuard-ML](https://github.com/Arindam-GitH/FraudGuard-ML), formerly referenced as Payment Fraud Detection. We did not adopt its random split or SMOTE approach because those conflict with this project's temporal-leakage and imbalance guardrails. Its repository also has no committed license file despite an MIT badge in its README, so no source code was copied. This implementation's generator, chronological state handling, features, benchmarking, scoring, and explanations were written independently.
+```bash
+python -m pytest -q tests/test_dashboard_ui.py
+```
+
+Run the simulated-enforcement isolation tests:
+
+```bash
+python -m pytest -q tests/test_mock_enforcement.py \
+  tests/test_dashboard_ui.py -k "mock_enforcement or fraud_confirmation or captured_edge_case"
+```
+
+These tests patch the HTTP client and fail if a mock capture/refund action attempts an outbound request.
+
+## Model results
+
+The dataset contains 50,000 generated transactions. The newest 30%, or 15,000 transactions, form the untouched held-out test window.
+
+| Metric | Result |
+|---|---:|
+| Model | Tuned, uncalibrated XGBoost |
+| Decision threshold | 0.26 |
+| Precision | 13.35% |
+| Recall | 76.61% |
+| F1 | 22.74% |
+| PR-AUC | 0.2982 |
+| ROC-AUC | 0.8549 |
+| Brier score | 0.0462 |
+
+At this threshold:
+
+| Outcome | Transactions |
+|---|---:|
+| True positives | 226 |
+| False positives | 1,467 |
+| True negatives | 13,238 |
+| False negatives | 69 |
+
+### Why is precision only 13.35%?
+
+The example policy assigns a cost of `$5` to reviewing a legitimate payment and `$500` to missing fraud. Under that 100:1 assumption, the cheapest threshold favors recall: it catches 76.61% of labelled fraud but produces many false alarms.
+
+Put plainly, approximately 87 of every 100 payments flagged at this threshold are false positives. FraudLens shows this openly because the model is suitable for **human review**, not automatic payment blocking.
+
+The cost assumptions are illustrative, not universal business values. The **Model insights** view lets a reviewer change them and see how the threshold, precision, recall, and total cost respond.
+
+At the saved `$5` / `$500` policy, the measured total held-out cost is **$41,835**.
+
+## How the model works
+
+FraudLens computes every historical feature using transactions strictly earlier than the payment being scored. Rows with the same timestamp cannot observe one another.
+
+Model signals include:
+
+- Card and device transaction counts over one-hour and 24-hour windows.
+- Billing-country and IP-country mismatch.
+- Deviation from the customer's earlier spending pattern.
+- Whether the device was previously seen.
+- Time since the customer's previous transaction.
+- Time-of-day behavior.
+
+Training uses a chronological 70/30 split rather than a random split. Model selection happens inside the training window, and the newest 30% is used only for final evaluation. The pipeline does not use SMOTE or duplicate minority rows.
+
+To regenerate the dataset, train the candidates, evaluate the winner, and rebuild artifacts:
+
+```bash
+python -m backend.src.train
+python -m backend.src.global_importance
+```
+
+Training evaluates 180 XGBoost parameter combinations inside the temporal training window and compares the selected candidate with calibrated XGBoost, random forest, and logistic regression.
+
+## Evidence and AI explanations
+
+SHAP identifies the strongest positive contributors to a synthetic transaction's model score. Python converts the exact values into deterministic evidence such as elevated velocity, geography mismatch, unusual amount, or a first-seen device.
+
+Azure OpenAI is optional. When configured, it writes a short explanation connecting those facts. It cannot supply evidence values, change the model result, or trigger capture/refund. If AI configuration is missing or unavailable, the score and deterministic evidence continue to work.
+
+Copy `.env.example` to `.env` and configure these values only if narrative reports and chat are needed:
+
+```dotenv
+AZURE_OPENAI_API_KEY=replace-with-your-api-key
+AZURE_OPENAI_ENDPOINT=https://your-resource-name.openai.azure.com
+AZURE_OPENAI_DEPLOYMENT_NAME=your-chat-model-deployment
+AZURE_OPENAI_API_VERSION=v1
+```
+
+Use the exact endpoint, deployment name, and supported API version shown in the Azure portal for your deployed chat model. Restart the FastAPI backend after changing `.env`. The `.env` file is ignored by Git; never paste its API key into frontend code or commit it.
+
+## Supabase durable review storage
+
+FraudLens can store real-payment review records, webhook de-duplication,
+authorization revocations, and the append-only enforcement audit in the
+Supabase project. Synthetic transactions and model artifacts remain local
+because they are part of the reproducible demo dataset.
+
+### Setup
+
+1. Open the Supabase SQL Editor and run
+   `supabase/migrations/20260904145002_supabase_review_storage.sql`.
+2. Add the server-only values to `.env`:
+
+   ```dotenv
+   FRAUDLENS_STORAGE=supabase
+   SUPABASE_URL=https://your-project-ref.supabase.co
+   SUPABASE_SECRET_KEY=sb_secret_...
+   ```
+
+   The publishable key is not needed because the Streamlit and FastAPI
+   processes access Supabase server-side. Never put the secret key in frontend
+   JavaScript, source control, or a browser-exposed environment variable.
+3. Start the API and verify the schema:
+
+   ```bash
+   curl http://localhost:8000/health/storage
+   ```
+
+   A configured project returns `{"status":"ok","backend":"supabase"}`.
+   The default `FRAUDLENS_STORAGE=sqlite` path remains available for isolated
+   local tests and the mock walkthrough.
+
+## Optional Razorpay Test Mode integration
+
+The mock demo is the recommended presentation path. The integration below is optional and must use Test Mode credentials only.
+
+### Safety requirements
+
+1. Create or use a Razorpay Partner application in **Test Mode**.
+2. Request and manually approve the `read_write` OAuth scope in the Partner Dashboard. Write access is needed for capture and refund.
+3. Configure payments through the Razorpay Orders API with **Manual Capture**. If Razorpay captures a payment automatically, FraudLens cannot hold it for review.
+4. Configure a Test Mode webhook for `payment.authorized` and `payment.captured`.
+5. Keep every credential server-side and outside Git.
+
+### Environment variables
+
+```dotenv
+RAZORPAY_CLIENT_ID=replace-with-your-test-client-id
+RAZORPAY_CLIENT_SECRET=replace-with-your-test-client-secret
+RAZORPAY_REDIRECT_URI=http://localhost:8501
+RAZORPAY_MODE=test
+RAZORPAY_WEBHOOK_SECRET=replace-with-your-webhook-secret
+RAZORPAY_ENFORCEMENT_DB=backend/data/razorpay_enforcement.sqlite3
+RAZORPAY_MOCK_AUTH=false
+RAZORPAY_AUTH_DISABLED=false
+```
+
+The Partner Dashboard scope approval and redirect URI configuration are manual steps outside this repository.
+
+### Real Test Mode review flow
+
+```text
+Razorpay payment authorized
+        │
+        ▼
+POST /webhooks/razorpay
+        │
+        ├─ verify X-Razorpay-Signature over the raw body
+        ├─ deduplicate x-razorpay-event-id
+        └─ store pending review in Supabase
+                    │
+                    ▼
+              Human reviewer
+              ├─ approve -> capture exact order amount/currency
+              ├─ fraud -> withhold capture and stop fulfillment
+              └─ already captured -> request full refund
+```
+
+An uncaptured authorization is not immediately voided by FraudLens. It waits for Razorpay's configured automatic-refund timeout. Razorpay documents a maximum three-day authorization hold, so the merchant must configure and understand that timeout.
+
+Capture and refund actions re-fetch the current payment first. An already captured or refunded payment becomes a recorded no-op instead of a repeated mutation. Refund requests also use a stable idempotency key.
+
+## API endpoints
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/health` | Service health check |
+| `POST` | `/score` | Score one synthetic transaction |
+| `POST` | `/score/batch` | Chronologically score a synthetic batch |
+| `POST` | `/report/{transaction_id}` | Build evidence for a retained scored transaction |
+| `POST` | `/demo-report` | Build the dashboard's synthetic evidence report |
+| `POST` | `/chat/{transaction_id}` | Ask about a retained scored transaction |
+| `POST` | `/preview-chat` | Ask about dashboard-visible payment fields |
+| `POST` | `/webhooks/razorpay` | Receive and verify Razorpay Test Mode webhooks |
+| `GET` | `/health/storage` | Verify the configured review-storage backend and schema |
+
+The scorer keeps recent history in memory. Separate scoring batches must move forward in time. A production implementation would hydrate that state from a durable feature store.
+
+## Security and safety
+
+- `.env` is ignored by Git; `.env.example` contains placeholders only.
+- Supabase secret keys stay server-side; public roles are denied access to the review tables by RLS and grants.
+- Razorpay client secrets, access tokens, and webhook secrets stay server-side.
+- Webhooks are rejected unless the raw-body HMAC signature is valid.
+- Duplicate webhook events are ignored.
+- OAuth and enforcement reject live-mode use.
+- Mock enforcement has no import of the real enforcement module and no HTTP dependency.
+- Real payment mutations always require a human click and reviewer identity.
+- The model score never directly triggers Razorpay capture or refund.
+- CSV exports are protected against spreadsheet-formula injection.
+- The explanation layer is defense-only and does not provide fraud-evasion guidance.
+
+To check that a local `.env` is not tracked:
+
+```bash
+git check-ignore -v .env
+git ls-files .env
+```
+
+The second command should produce no output.
+
+## Known limitations / not yet implemented
+
+- Model training and reported metrics use synthetic data, so performance will not transfer directly to real payment traffic.
+- Real Razorpay Payments API records are not scored because required enrichment fields are unavailable.
+- There is no production webhook integration for real-time model scoring or automatic enforcement; the narrow Test Mode handler records review lifecycle events and clears a local session when Razorpay sends `account.app.authorization_revoked`.
+- There is no production real-payment blocking or model-driven capture control. Test Mode capture/refund actions are explicit, human-approved controls only.
+- Fulfillment status is local; no warehouse or order-management system is connected.
+- The Supabase migration must be applied before `FRAUDLENS_STORAGE=supabase` can serve real review events.
+- OAuth `state` and mock walkthrough state are process/session-local.
+- Scoring history is held in memory and is lost on API restart.
+- Real disputes and chargebacks are not fed back into training.
+- A production launch would require enriched data, calibration review, drift and fairness monitoring, privacy controls, shared storage, and operational approval.
+
+## Project structure
+
+```text
+frontend/app.py                     Streamlit reviewer interface and navigation
+frontend/redesign.css               Dashboard visual theme
+frontend/mock_enforcement.py        Session-only simulated payment actions
+frontend/processing.py              UI-safe filtering, reports, and API adapters
+frontend/razorpay_oauth.py          Test Mode OAuth and payment-history client
+frontend/requirements.txt           Frontend-only runtime dependencies
+backend/api/main.py                 FastAPI scoring, reports, chat, and webhook routes
+backend/data/generate_synthetic.py  Reproducible synthetic dataset generator
+backend/src/features.py             Chronological leakage-safe feature engineering
+backend/src/train.py                Training, selection, and artifact generation
+backend/src/tune.py                 Temporal XGBoost search
+backend/src/evaluate.py             Metrics, thresholds, and cost curve
+backend/src/explain.py              SHAP evidence and reason codes
+backend/src/global_importance.py    Held-out global SHAP signal importance
+backend/src/score.py                Stateful single and batch scoring
+backend/src/razorpay_enforcement.py Webhook state, audit log, capture, and refund service
+backend/src/review_store.py        SQLite/Supabase durable review-storage adapters
+backend/requirements.txt            Backend-only runtime dependencies
+supabase/migrations/                RLS-protected Supabase review-storage schema
+backend/models/                     Saved trained model
+backend/reports/metrics/            Saved evaluation and threshold artifacts
+backend/reports/figures/            Evaluation charts
+tests/                              Cross-layer unit, integration, security, and UI tests
+```
+
+## Design principles
+
+1. **Evidence before automation.** Scores are accompanied by inspectable reasons.
+2. **Human authority over money movement.** No model-driven capture or refund.
+3. **Honest boundaries.** Synthetic and Razorpay data are clearly separated.
+4. **Time-respecting evaluation.** Future transactions never leak into earlier features.
+5. **Visible trade-offs.** False positives and their cost are reported, not hidden.
+
+## Acknowledgements
+
+The reporting structure was informed by the public [Financial Fraud Risk Engine](https://github.com/AmirhosseinHonardoust/Financial-Fraud-Risk-Engine), and the multi-model comparison was inspired by [FraudGuard-ML](https://github.com/Arindam-GitH/FraudGuard-ML). FraudLens uses its own generator, chronological feature pipeline, training process, scoring logic, enforcement code, and dashboard implementation.

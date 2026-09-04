@@ -125,7 +125,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rows", type=int, default=50_000)
     parser.add_argument("--seed", type=int, default=SEED)
-    parser.add_argument("--output", type=Path, default=Path("data/transactions.csv"))
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path(__file__).resolve().parent / "transactions.csv",
+    )
     args = parser.parse_args()
     transactions = generate_transactions(args.rows, args.seed)
     args.output.parent.mkdir(parents=True, exist_ok=True)

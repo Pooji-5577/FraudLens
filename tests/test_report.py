@@ -1,8 +1,9 @@
 import pandas as pd
+from pathlib import Path
 
-from src.features import engineer_features
-import src.report as report_module
-from src.report import (
+from backend.src.features import engineer_features
+import backend.src.report as report_module
+from backend.src.report import (
     CHAT_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     answer_preview_transaction_question,
@@ -12,7 +13,7 @@ from src.report import (
     generate_demo_report,
     generate_report,
 )
-from src.score import FraudScorer
+from backend.src.score import FraudScorer
 
 
 AZURE_ENV = (
@@ -21,6 +22,11 @@ AZURE_ENV = (
     "AZURE_OPENAI_DEPLOYMENT_NAME",
     "AZURE_OPENAI_API_VERSION",
 )
+
+
+def test_azure_configuration_is_loaded_from_the_repository_root():
+    expected = Path(__file__).resolve().parents[1] / ".env"
+    assert report_module.PROJECT_ENV_PATH == expected
 
 
 def _transactions():

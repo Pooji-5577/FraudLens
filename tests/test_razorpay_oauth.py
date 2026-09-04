@@ -1,9 +1,10 @@
 from urllib.parse import parse_qs, urlparse
 
-from dashboard.razorpay_oauth import (
+from frontend.razorpay_oauth import (
     PAYMENTS_URL,
     REVOKE_URL,
     TOKEN_URL,
+    RazorpayOAuthError,
     amount_from_subunits,
     build_authorization_url,
     consume_oauth_state,
@@ -13,9 +14,10 @@ from dashboard.razorpay_oauth import (
     revoke_access_token,
     state_matches,
 )
+import pytest
 
 
-def test_authorization_url_requests_read_only_access_and_state():
+def test_authorization_url_requests_read_write_access_and_state():
     url = build_authorization_url("client_123", "https://app.test/callback", "csrf-state")
     parsed = urlparse(url)
     query = parse_qs(parsed.query)
@@ -25,7 +27,7 @@ def test_authorization_url_requests_read_only_access_and_state():
         "client_id": ["client_123"],
         "response_type": ["code"],
         "redirect_uri": ["https://app.test/callback"],
-        "scope": ["read_only"],
+        "scope": ["read_write"],
         "state": ["csrf-state"],
     }
     assert state_matches("csrf-state", "csrf-state")
@@ -72,6 +74,23 @@ def test_authorization_code_is_exchanged_server_side():
         "mode": "test",
     }
     assert token["razorpay_account_id"] == "acc_123"
+    assert token["mode"] == "test"
+
+
+def test_oauth_exchange_refuses_live_mode_before_network_call():
+    class Client:
+        def post(self, *args, **kwargs):
+            raise AssertionError("live-mode OAuth must not reach Razorpay")
+
+    with pytest.raises(RazorpayOAuthError, match="Test Mode"):
+        exchange_authorization_code(
+            "auth-code",
+            client_id="client_123",
+            client_secret="server-secret",
+            redirect_uri="https://app.test/callback",
+            mode="live",
+            http_client=Client(),
+        )
 
 
 def test_payments_are_fetched_with_bearer_auth_and_date_filters():

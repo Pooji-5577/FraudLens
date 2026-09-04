@@ -1,4 +1,4 @@
-from data.generate_synthetic import generate_transactions
+from backend.data.generate_synthetic import generate_transactions
 
 
 def test_generator_is_reproducible_imbalanced_and_well_formed():

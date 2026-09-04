@@ -1,8 +1,8 @@
 import pandas as pd
 import pytest
 
-from src.features import engineer_features
-from src.score import FraudScorer
+from backend.src.features import engineer_features
+from backend.src.score import FraudScorer
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 

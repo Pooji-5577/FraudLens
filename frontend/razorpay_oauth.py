@@ -48,12 +48,12 @@ def amount_from_subunits(amount: int | float, currency: str) -> float:
 
 
 def build_authorization_url(client_id: str, redirect_uri: str, state: str) -> str:
-    """Build a least-privilege Razorpay OAuth authorization URL."""
+    """Build the Razorpay OAuth URL needed for human-approved enforcement."""
     parameters = {
         "client_id": client_id,
         "response_type": "code",
         "redirect_uri": redirect_uri,
-        "scope": "read_only",
+        "scope": "read_write",
         "state": state,
     }
     return f"{AUTHORIZE_URL}?{urlencode(parameters)}"
@@ -99,8 +99,8 @@ def exchange_authorization_code(
     http_client=requests,
 ) -> dict[str, Any]:
     """Exchange an authorization code from Razorpay on the server."""
-    if mode not in {"test", "live"}:
-        raise RazorpayOAuthError("RAZORPAY_MODE must be either 'test' or 'live'.")
+    if mode != "test":
+        raise RazorpayOAuthError("FraudLens Razorpay access is restricted to Test Mode.")
     try:
         response = http_client.post(
             TOKEN_URL,
@@ -125,6 +125,7 @@ def exchange_authorization_code(
 
     if not isinstance(token, dict) or not token.get("access_token"):
         raise RazorpayOAuthError("Razorpay did not return an access token.")
+    token["mode"] = "test"
     return token
 
 

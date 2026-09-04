@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -11,6 +12,26 @@ from urllib.parse import quote
 
 class ScoringAPIError(RuntimeError):
     """A safe, user-displayable scoring service failure."""
+
+
+_FORMULA_TRIGGER_CHARS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_injection_safe(frame: pd.DataFrame) -> pd.DataFrame:
+    """Prefix string cells spreadsheet apps would interpret as formulas.
+
+    Razorpay payment fields like order_id, email, and contact are external
+    input; a cell starting with =, +, -, or @ can execute as a formula when
+    the exported CSV is later opened in Excel or Sheets. A leading apostrophe
+    is the standard escape spreadsheet apps honor to force text.
+    """
+
+    def escape(value: object) -> object:
+        if isinstance(value, str) and value.startswith(_FORMULA_TRIGGER_CHARS):
+            return "'" + value
+        return value
+
+    return frame.map(escape)
 
 
 def load_threshold_curve(path: Path | str) -> pd.DataFrame:
@@ -37,6 +58,18 @@ def cheapest_threshold_row(priced_curve: pd.DataFrame) -> pd.Series:
     if priced_curve.empty:
         raise ValueError("threshold curve is empty")
     return priced_curve.loc[priced_curve["total_cost"].idxmin()]
+
+
+def load_global_importance(path: Path | str) -> dict:
+    """Load the real held-out mean(|SHAP|) signal importance, sorted highest first."""
+    payload = json.loads(Path(path).read_text())
+    percentages = payload.get("signal_importance_percent")
+    if not isinstance(percentages, dict) or not percentages:
+        raise ValueError("global importance artifact is missing signal_importance_percent")
+    payload["signal_importance_percent"] = dict(
+        sorted(percentages.items(), key=lambda item: item[1], reverse=True)
+    )
+    return payload
 
 
 def risk_evidence_summary(transactions: pd.DataFrame, threshold: float) -> dict:
@@ -110,6 +143,76 @@ def risk_audit_rows(transactions: pd.DataFrame, threshold: float) -> pd.DataFram
             ),
         })
     return pd.DataFrame(rows)
+
+
+def demo_case_catalog(transactions: pd.DataFrame, threshold: float = .65) -> pd.DataFrame:
+    """Summarize every labelled outcome available in the synthetic demo data.
+
+    The catalog is intentionally derived from the rows shown in the dashboard, so the
+    walkthrough never claims that a case exists without an example payment behind it.
+    It is only for synthetic/mock sessions; real Razorpay rows do not have the labels or
+    model signals required to classify these cases.
+    """
+    required = {"payment_id", "risk_score", "risk_status", "actual"}
+    missing = required - set(transactions.columns)
+    if missing:
+        raise ValueError(f"demo case catalog requires columns: {', '.join(sorted(missing))}")
+
+    columns = ["Case", "Rows", "Example payment", "Example score", "What it demonstrates"]
+    if transactions.empty:
+        return pd.DataFrame(columns=columns)
+
+    labelled = transactions.copy()
+    labelled["_score"] = pd.to_numeric(labelled["risk_score"], errors="coerce")
+    labelled = labelled.loc[labelled["_score"].notna()].copy()
+    labelled["_blocked"] = labelled["_score"].ge(threshold)
+    labelled["_fraud"] = labelled["actual"].eq("Fraud")
+    labelled["_outcome"] = "Correctly allowed"
+    labelled.loc[labelled["_blocked"] & labelled["_fraud"], "_outcome"] = "Correctly blocked"
+    labelled.loc[labelled["_blocked"] & ~labelled["_fraud"], "_outcome"] = "False positive"
+    labelled.loc[~labelled["_blocked"] & labelled["_fraud"], "_outcome"] = "False negative"
+
+    definitions = [
+        (
+            "Low risk / allowed",
+            labelled["risk_status"].eq("Low risk"),
+            "Below the review band; the synthetic policy leaves it allowed.",
+        ),
+        (
+            "Review band",
+            labelled["risk_status"].eq("Review"),
+            "Uncertain score band; a reviewer can inspect the supporting signals.",
+        ),
+        (
+            "High risk / report",
+            labelled["risk_status"].eq("High risk"),
+            "At the demo block threshold; open the evidence report walkthrough.",
+        ),
+        (
+            "False positive",
+            labelled["_outcome"].eq("False positive"),
+            "A synthetic legitimate label above the threshold; inspect customer-friction cost.",
+        ),
+        (
+            "False negative",
+            labelled["_outcome"].eq("False negative"),
+            "A synthetic fraud label below the threshold; inspect missed-fraud cost.",
+        ),
+    ]
+    catalog = []
+    for case, mask, explanation in definitions:
+        matching = labelled.loc[mask].sort_values("_score", ascending=False)
+        sample = matching.iloc[0] if not matching.empty else None
+        catalog.append(
+            {
+                "Case": case,
+                "Rows": int(len(matching)),
+                "Example payment": str(sample["payment_id"]) if sample is not None else "—",
+                "Example score": float(sample["_score"]) if sample is not None else None,
+                "What it demonstrates": explanation,
+            }
+        )
+    return pd.DataFrame(catalog, columns=columns)
 
 
 def filter_transactions_by_date(

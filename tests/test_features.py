@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
 
-from src.features import MODEL_FEATURES, FeatureState, engineer_features
+from backend.src.features import MODEL_FEATURES, FeatureState, engineer_features
 
 
 def _rows():

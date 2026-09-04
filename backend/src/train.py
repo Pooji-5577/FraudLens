@@ -9,17 +9,17 @@ from pathlib import Path
 import joblib
 from sklearn.isotonic import IsotonicRegression
 
-from data.generate_synthetic import SEED, generate_transactions
-from src.benchmark import (
+from backend.data.generate_synthetic import SEED, generate_transactions
+from backend.src.benchmark import (
     compare_probability_sets,
     fit_baselines,
     predict_probabilities,
     write_benchmark_artifacts,
 )
-from src.calibration import TemporalCalibratedClassifier
-from src.evaluate import write_evaluation_artifacts
-from src.features import MODEL_FEATURES, engineer_features, model_matrix
-from src.tune import make_xgboost, temporal_xgboost_search
+from backend.src.calibration import TemporalCalibratedClassifier
+from backend.src.evaluate import write_evaluation_artifacts
+from backend.src.features import MODEL_FEATURES, engineer_features, model_matrix
+from backend.src.tune import make_xgboost, temporal_xgboost_search
 
 
 def _split_before_timestamp(frame, fraction: float):
@@ -28,7 +28,11 @@ def _split_before_timestamp(frame, fraction: float):
     return frame[frame["timestamp"] < cutoff], frame[frame["timestamp"] >= cutoff], cutoff
 
 
-def train_pipeline(rows: int = 50_000, seed: int = SEED, root: Path = Path(".")) -> dict:
+def train_pipeline(
+    rows: int = 50_000,
+    seed: int = SEED,
+    root: Path = Path(__file__).resolve().parents[1],
+) -> dict:
     data_path = root / "data" / "transactions.csv"
     model_path = root / "models" / "fraud_detector.joblib"
     report_path = root / "reports"
