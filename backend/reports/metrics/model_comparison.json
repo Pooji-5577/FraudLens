@@ -1,22 +1,22 @@
 [
   {
     "model": "tuned_xgboost_uncalibrated",
-    "average_precision": 0.29822179459779924,
-    "roc_auc": 0.8548847100317545
+    "average_precision": 0.3202612194794854,
+    "roc_auc": 0.8593680230983349
   },
   {
     "model": "tuned_xgboost_calibrated",
-    "average_precision": 0.2890815158397913,
-    "roc_auc": 0.8553847129132833
+    "average_precision": 0.3130123832505513,
+    "roc_auc": 0.8629977120661138
   },
   {
     "model": "random_forest",
-    "average_precision": 0.28725810377374883,
-    "roc_auc": 0.8466030809306186
+    "average_precision": 0.30242653407299835,
+    "roc_auc": 0.8493499847278972
   },
   {
     "model": "logistic_regression",
-    "average_precision": 0.2682583374294644,
-    "roc_auc": 0.8497430252594816
+    "average_precision": 0.2890740145253989,
+    "roc_auc": 0.8550395057601761
   }
 ]

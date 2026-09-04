@@ -29,9 +29,26 @@ def metrics_at_threshold(y_true, probabilities, threshold: float, cost_fp: float
     fn = int(np.sum((pred == 0) & (y == 1)))
     tp = int(np.sum((pred == 1) & (y == 1)))
     tn = int(np.sum((pred == 0) & (y == 0)))
+    negatives = fp + tn
+    positives = tp + fn
+    predicted_positives = tp + fp
+    predicted_negatives = tn + fn
+    false_positive_rate = fp / negatives if negatives else 0.0
+    false_negative_rate = fn / positives if positives else 0.0
+    specificity = tn / negatives if negatives else 0.0
+    negative_predictive_value = tn / predicted_negatives if predicted_negatives else 0.0
     return {
         "threshold": float(threshold), "precision": float(precision), "recall": float(recall),
-        "f1": float(f1), "tp": tp, "fp": fp, "tn": tn, "fn": fn,
+        "f1": float(f1),
+        "false_positive_rate": float(false_positive_rate),
+        "false_negative_rate": float(false_negative_rate),
+        "specificity": float(specificity),
+        "negative_predictive_value": float(negative_predictive_value),
+        "accuracy": float((tp + tn) / len(y)) if len(y) else 0.0,
+        "balanced_accuracy": float((recall + specificity) / 2),
+        "fraud_prevalence": float(positives / len(y)) if len(y) else 0.0,
+        "predicted_positive_rate": float(predicted_positives / len(y)) if len(y) else 0.0,
+        "tp": tp, "fp": fp, "tn": tn, "fn": fn,
         "total_cost": float(fp * cost_fp + fn * cost_fn),
     }
 
@@ -73,20 +90,34 @@ def calibration_summary(y_true, probabilities, n_bins: int = 10) -> dict:
 
 
 def write_evaluation_artifacts(
-    y_true, probabilities, output_dir: Path, cost_fp: float = 5.0, cost_fn: float = 500.0
+    y_true,
+    probabilities,
+    output_dir: Path,
+    decision_threshold: float,
+    validation_selection: dict,
+    cost_fp: float = 5.0,
+    cost_fn: float = 500.0,
 ) -> dict:
     metrics_dir = output_dir / "metrics"
     figures_dir = output_dir / "figures"
     metrics_dir.mkdir(parents=True, exist_ok=True)
     figures_dir.mkdir(parents=True, exist_ok=True)
     curve = sweep_thresholds(y_true, probabilities, cost_fp=cost_fp, cost_fn=cost_fn)
-    chosen = best_cost_threshold(curve)
+    chosen = metrics_at_threshold(
+        y_true, probabilities, decision_threshold, cost_fp=cost_fp, cost_fn=cost_fn
+    )
     recomputed_cost = chosen["fn"] * cost_fn + chosen["fp"] * cost_fp
     if not np.isclose(chosen["total_cost"], recomputed_cost):
         raise AssertionError("reported threshold cost does not match FP/FN cost arithmetic")
     calibration = calibration_summary(y_true, probabilities)
     summary = {
         "evaluation_split": "most recent 30% by timestamp",
+        "threshold_selection": {
+            "source": "validation window inside the earlier 70% training period",
+            "objective": "minimum illustrative false-positive/false-negative cost",
+            "test_set_used_for_selection": False,
+            **validation_selection,
+        },
         "cost_fp": cost_fp, "cost_fn": cost_fn,
         "chosen": chosen, "calibration": calibration,
         "ranking": {
@@ -95,24 +126,39 @@ def write_evaluation_artifacts(
         },
         "selected_thresholds": [
             metrics_at_threshold(y_true, probabilities, t, cost_fp, cost_fn)
-            for t in (0.005, 0.01, 0.025, 0.05, 0.1, 0.25)
+            for t in sorted({0.005, 0.01, 0.025, 0.05, 0.1, 0.25, float(decision_threshold)})
         ],
     }
     curve.to_csv(metrics_dir / "threshold_curve.csv", index=False)
     (metrics_dir / "evaluation.json").write_text(json.dumps(summary, indent=2) + "\n")
-    _write_plots(y_true, probabilities, curve, calibration, figures_dir)
+    _write_plots(
+        y_true, probabilities, curve, calibration, figures_dir, float(decision_threshold)
+    )
     return summary
 
 
-def _write_plots(y_true, probabilities, curve: pd.DataFrame, calibration: dict, figures_dir: Path) -> None:
+def _write_plots(
+    y_true,
+    probabilities,
+    curve: pd.DataFrame,
+    calibration: dict,
+    figures_dir: Path,
+    decision_threshold: float,
+) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.plot(curve["threshold"], curve["total_cost"])
-    ax.set(xlabel="Decision threshold", ylabel="Total expected cost ($)", title="Held-out cost curve")
+    ax.axvline(decision_threshold, color="black", linestyle="--", label="validation-selected")
+    ax.set(
+        xlabel="Decision threshold",
+        ylabel="Illustrative error cost ($)",
+        title="Held-out threshold sensitivity (descriptive only)",
+    )
     ax.grid(alpha=0.25)
+    ax.legend()
     fig.tight_layout()
     fig.savefig(figures_dir / "cost_curve.png", dpi=150)
     plt.close(fig)
@@ -121,6 +167,8 @@ def _write_plots(y_true, probabilities, curve: pd.DataFrame, calibration: dict, 
     ax.plot(curve["threshold"], curve["precision"], label="precision")
     ax.plot(curve["threshold"], curve["recall"], label="recall")
     ax.plot(curve["threshold"], curve["f1"], label="F1")
+    ax.plot(curve["threshold"], curve["false_positive_rate"], label="false-positive rate")
+    ax.axvline(decision_threshold, color="black", linestyle="--", label="validation-selected")
     ax.set(xlabel="Decision threshold", ylabel="Metric", ylim=(0, 1), title="Held-out threshold trade-offs")
     ax.grid(alpha=0.25)
     ax.legend()

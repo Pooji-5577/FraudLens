@@ -38,3 +38,15 @@ def test_production_shap_top_reason_tracks_extreme_velocity():
     assert result["blocked"]
     assert "transactions" in result["reasons"][0]
     assert "last hour" in result["reasons"][0]
+    assert "met the" in result["reasons"][-1]
+    assert "review threshold" in result["reasons"][-1]
+
+
+def test_below_threshold_transaction_explains_the_decision_boundary():
+    scorer = FraudScorer()
+    result = scorer.score_batch(_velocity_burst().iloc[:1]).iloc[0]
+
+    assert not result["flagged"]
+    assert result["reasons"] == [
+        f"Score {result['score']:.3f} stayed below the {scorer.threshold:.3f} review threshold"
+    ]

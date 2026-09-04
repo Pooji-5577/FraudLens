@@ -35,9 +35,12 @@ def csv_injection_safe(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_threshold_curve(path: Path | str) -> pd.DataFrame:
-    """Load the held-out (never-trained-on) per-threshold confusion counts."""
+    """Load held-out threshold sensitivity data for descriptive policy analysis."""
     curve = pd.read_csv(path)
-    required = {"threshold", "precision", "recall", "f1", "tp", "fp", "tn", "fn"}
+    required = {
+        "threshold", "precision", "recall", "f1", "false_positive_rate",
+        "tp", "fp", "tn", "fn",
+    }
     missing = required - set(curve.columns)
     if missing:
         raise ValueError(f"threshold curve requires columns: {', '.join(sorted(missing))}")
@@ -45,7 +48,7 @@ def load_threshold_curve(path: Path | str) -> pd.DataFrame:
 
 
 def cost_curve_for_ratio(curve: pd.DataFrame, cost_fp: float, cost_fn: float) -> pd.DataFrame:
-    """Recompute total held-out cost at every threshold for a chosen cost-per-error ratio."""
+    """Recompute descriptive held-out cost for a chosen error-cost assumption."""
     if cost_fp < 0 or cost_fn < 0:
         raise ValueError("costs must be non-negative")
     priced = curve.copy()
@@ -429,3 +432,131 @@ def ask_preview_transaction_question(
     if not isinstance(answer, dict) or "status" not in answer or "transaction_id" not in answer:
         raise ScoringAPIError("The scoring service returned an invalid chat response.")
     return answer
+
+
+def _request_error_detail(exc: requests.RequestException) -> str:
+    if exc.response is None:
+        return ""
+    try:
+        return exc.response.json().get("detail", "")
+    except ValueError:
+        return ""
+
+
+def list_fraud_cases(
+    api_url: str,
+    *,
+    status: str | None = None,
+    timeout: float = 15.0,
+    http_client=requests,
+) -> list[dict]:
+    """List case-management rows, optionally filtered by status."""
+    try:
+        response = http_client.get(
+            f"{api_url.rstrip('/')}/cases",
+            params={"status": status} if status else None,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        cases = response.json()
+    except requests.Timeout as exc:
+        raise ScoringAPIError("Listing cases timed out. Please try again.") from exc
+    except requests.ConnectionError as exc:
+        raise ScoringAPIError("The scoring service is offline or unreachable.") from exc
+    except requests.RequestException as exc:
+        raise ScoringAPIError(_request_error_detail(exc) or "Cases could not be loaded.") from exc
+    except ValueError as exc:
+        raise ScoringAPIError("The scoring service returned an invalid case list.") from exc
+    if not isinstance(cases, list):
+        raise ScoringAPIError("The scoring service returned an invalid case list.")
+    return cases
+
+
+def get_fraud_case(
+    transaction_id: str,
+    api_url: str,
+    *,
+    timeout: float = 15.0,
+    http_client=requests,
+) -> dict:
+    """Fetch one case's current status plus its notes."""
+    try:
+        response = http_client.get(
+            f"{api_url.rstrip('/')}/cases/{transaction_id}", timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except requests.Timeout as exc:
+        raise ScoringAPIError("Loading the case timed out. Please try again.") from exc
+    except requests.ConnectionError as exc:
+        raise ScoringAPIError("The scoring service is offline or unreachable.") from exc
+    except requests.RequestException as exc:
+        raise ScoringAPIError(_request_error_detail(exc) or "The case could not be loaded.") from exc
+    except ValueError as exc:
+        raise ScoringAPIError("The scoring service returned an invalid case.") from exc
+    if not isinstance(payload, dict) or "case" not in payload or "notes" not in payload:
+        raise ScoringAPIError("The scoring service returned an invalid case.")
+    return payload
+
+
+def set_fraud_case_status(
+    transaction_id: str,
+    status: str,
+    api_url: str,
+    *,
+    actor: str = "",
+    risk_score: float | None = None,
+    timeout: float = 15.0,
+    http_client=requests,
+) -> dict:
+    """Set a case's investigation status, creating the case if it doesn't exist."""
+    try:
+        response = http_client.post(
+            f"{api_url.rstrip('/')}/cases/{transaction_id}/status",
+            json={"status": status, "actor": actor, "risk_score": risk_score},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        case = response.json()
+    except requests.Timeout as exc:
+        raise ScoringAPIError("Saving the case status timed out. Please try again.") from exc
+    except requests.ConnectionError as exc:
+        raise ScoringAPIError("The scoring service is offline or unreachable.") from exc
+    except requests.RequestException as exc:
+        raise ScoringAPIError(_request_error_detail(exc) or "The case status could not be saved.") from exc
+    except ValueError as exc:
+        raise ScoringAPIError("The scoring service returned an invalid case.") from exc
+    if not isinstance(case, dict):
+        raise ScoringAPIError("The scoring service returned an invalid case.")
+    return case
+
+
+def add_fraud_case_note(
+    transaction_id: str,
+    note: str,
+    api_url: str,
+    *,
+    author: str = "",
+    timeout: float = 15.0,
+    http_client=requests,
+) -> dict:
+    """Append an analyst note to a case, creating the case if it doesn't exist."""
+    try:
+        response = http_client.post(
+            f"{api_url.rstrip('/')}/cases/{transaction_id}/notes",
+            json={"note": note, "author": author},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        saved_note = response.json()
+    except requests.Timeout as exc:
+        raise ScoringAPIError("Saving the note timed out. Please try again.") from exc
+    except requests.ConnectionError as exc:
+        raise ScoringAPIError("The scoring service is offline or unreachable.") from exc
+    except requests.RequestException as exc:
+        raise ScoringAPIError(_request_error_detail(exc) or "The note could not be saved.") from exc
+    except ValueError as exc:
+        raise ScoringAPIError("The scoring service returned an invalid note.") from exc
+    if not isinstance(saved_note, dict):
+        raise ScoringAPIError("The scoring service returned an invalid note.")
+    return saved_note

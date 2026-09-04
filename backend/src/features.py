@@ -20,6 +20,8 @@ MODEL_FEATURES = [
     "device_txn_count_1h", "device_txn_count_24h", "geo_mismatch",
     "user_amount_zscore", "user_amount_mean", "user_amount_std",
     "is_new_device", "seconds_since_user_last_txn", "hour_sin", "hour_cos",
+    "amount_to_user_mean_ratio", "card_velocity_1h_log", "device_velocity_1h_log",
+    "geo_new_device", "geo_amount_ratio", "new_device_amount_ratio", "rapid_repeat",
 ]
 
 
@@ -107,6 +109,10 @@ def engineer_features(frame: pd.DataFrame, state: FeatureState | None = None) ->
             stats = state.user_stats.get(user, RunningStats())
             std = stats.std
             zscore = (amount - stats.mean) / std if std > 1e-9 else 0.0
+            amount_ratio = amount / stats.mean if stats.count and stats.mean > 1e-9 else 1.0
+            amount_ratio = float(np.clip(amount_ratio, 0.0, 25.0))
+            new_device = float(device not in state.user_devices[user])
+            geo_mismatch = float(row.billing_country != row.ip_country)
             last = state.user_last_timestamp.get(user)
             since_last = (timestamp - last).total_seconds() if last is not None else -1.0
             hour = timestamp.hour + timestamp.minute / 60.0
@@ -118,14 +124,23 @@ def engineer_features(frame: pd.DataFrame, state: FeatureState | None = None) ->
                     "card_txn_count_24h": len(state.card_24h[card]),
                     "device_txn_count_1h": len(state.device_1h[device]),
                     "device_txn_count_24h": len(state.device_24h[device]),
-                    "geo_mismatch": float(row.billing_country != row.ip_country),
+                    "geo_mismatch": geo_mismatch,
                     "user_amount_zscore": float(np.clip(zscore, -20.0, 20.0)),
                     "user_amount_mean": stats.mean if stats.count else 0.0,
                     "user_amount_std": std,
-                    "is_new_device": float(device not in state.user_devices[user]),
+                    "is_new_device": new_device,
                     "seconds_since_user_last_txn": since_last,
                     "hour_sin": np.sin(2 * np.pi * hour / 24),
                     "hour_cos": np.cos(2 * np.pi * hour / 24),
+                    # Explicit domain interactions help shallow trees represent the
+                    # strongest fraud patterns without assigning manual risk scores.
+                    "amount_to_user_mean_ratio": amount_ratio,
+                    "card_velocity_1h_log": float(np.log1p(len(state.card_1h[card]))),
+                    "device_velocity_1h_log": float(np.log1p(len(state.device_1h[device]))),
+                    "geo_new_device": geo_mismatch * new_device,
+                    "geo_amount_ratio": geo_mismatch * amount_ratio,
+                    "new_device_amount_ratio": new_device * amount_ratio,
+                    "rapid_repeat": float(0.0 <= since_last <= 5 * 60),
                 }
             )
             pending.append((card, device, user, amount, timestamp))

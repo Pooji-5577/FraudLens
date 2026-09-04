@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from html import escape
 import json
 import os
 from pathlib import Path
@@ -17,18 +18,20 @@ from dotenv import load_dotenv
 
 from frontend.processing import (
     ScoringAPIError,
+    add_fraud_case_note,
     ask_preview_transaction_question,
-    ask_transaction_question,
     cheapest_threshold_row,
     cost_curve_for_ratio,
     csv_injection_safe,
     demo_case_catalog,
     generate_demo_transaction_report,
+    get_fraud_case,
+    list_fraud_cases,
     load_global_importance,
     load_threshold_curve,
     risk_audit_rows,
     risk_evidence_summary,
-    score_uploaded_transactions,
+    set_fraud_case_status,
 )
 from frontend.mock_enforcement import apply_mock_action, initial_mock_scenarios
 from frontend.razorpay_oauth import (
@@ -59,7 +62,7 @@ CUT_LENS_MARK_SVG = (
 )
 
 
-def brand_lockup(size: str = "26px", text_size: str = "1.05rem", text_color: str = "#eef4ff", stroke: str = "#3395ff") -> str:
+def brand_lockup(size: str = "26px", text_size: str = "1.05rem", text_color: str = "#eef4ff", stroke: str = "#5d94fc") -> str:
     mark = CUT_LENS_MARK_SVG.format(stroke=stroke)
     return (
         f'<div class="brand-lockup" style="font-size:{text_size};color:{text_color};">'
@@ -68,88 +71,6 @@ def brand_lockup(size: str = "26px", text_size: str = "1.05rem", text_color: str
     )
 
 
-st.markdown(
-    """
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@700&family=Inter:wght@400;500;600&display=swap');
-    :root {
-      --navy: #0c2451; --navy-2: #123168; --blue: #3395ff; --blue-hover: #1c7ae6;
-      --blue-light: #8ec5ff; --bg: #f5f8ff; --border: #dbe6fa; --panel-bg: #eaf2ff;
-      --text-muted: #55698c; --text-dark: #0f2247; --sidebar-card: #14294f; --sidebar-border: #234a7a;
-    }
-    body, .stApp { font-family: 'Inter', system-ui, sans-serif; }
-    .stApp { background: var(--bg); }
-    [data-testid="stHeader"] { background: transparent; }
-    [data-testid="stSidebar"] { background: var(--navy); }
-    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
-    [data-testid="stSidebar"] h3, [data-testid="stSidebar"] p { color: #eef4ff; }
-    .block-container { max-width: 1420px; padding-top: 2.2rem; padding-bottom: 4rem; }
-    .hero { padding: 1.8rem 2rem; border-radius: 20px; color: white;
-      background: linear-gradient(120deg, var(--navy) 0%, var(--navy-2) 58%, var(--blue) 100%);
-      box-shadow: 0 16px 42px rgba(12,36,81,.18); margin-bottom: 1.35rem; }
-    .hero-kicker { color: var(--blue-light); font-size: .78rem; font-weight: 800; letter-spacing: .12em; }
-    .hero h1 { font-size: 2.25rem; margin: .35rem 0 .55rem; }
-    .hero p { color: #d9e6f5; font-size: 1.05rem; max-width: 860px; margin: 0; }
-    [data-testid="stMetric"] { background: white; border: 1px solid var(--border); padding: .9rem 1rem;
-      border-radius: 14px; box-shadow: 0 3px 12px rgba(12,36,81,.05); }
-    [data-testid="stMetricLabel"] p { color: var(--text-muted) !important; }
-    [data-testid="stMetricValue"] { color: var(--text-dark) !important; }
-    [data-testid="stBaseButton-primary"] { background: var(--blue); border-color: var(--blue); }
-    [data-testid="stBaseButton-primary"]:hover { background: var(--blue-hover); border-color: var(--blue-hover); }
-    [data-testid="stSidebar"] [data-testid="stBaseButton-secondary"] {
-      border-color: var(--sidebar-border); background: var(--sidebar-card); color: white; }
-    div[data-testid="stDataFrame"] { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
-    .workflow { display:grid; grid-template-columns:repeat(3,1fr); margin:0 0 1.4rem;
-      border:1px solid var(--border); border-radius:4px; overflow:hidden; background:white; }
-    .workflow.workflow-four { grid-template-columns:repeat(4,1fr); }
-    .workflow-step { padding:1rem 1.15rem; border-right:1px solid var(--border); background:var(--panel-bg); }
-    .workflow-step:last-child { border-right:0; background:var(--navy-2); color:white; }
-    .workflow-number { color:var(--blue); font-family:monospace; font-size:.82rem; margin-bottom:.3rem; }
-    .workflow-step:last-child .workflow-number { color:var(--blue-light); }
-    .workflow-title { font-weight:750; font-size:.98rem; color: var(--text-dark); }
-    .workflow-step:last-child .workflow-title { color: white; }
-    .importance-panel { border:1px solid var(--border); border-radius:5px; background:white; margin:1rem 0 1.35rem; }
-    .importance-title { padding:1rem 1.15rem; border-bottom:1px solid var(--border); font-weight:750; color: var(--text-dark); }
-    .importance-row { display:grid; grid-template-columns:270px 1fr 55px; gap:1rem; align-items:center;
-      padding:.7rem 1.15rem; border-bottom:1px solid var(--border); color: var(--text-dark); }
-    .importance-row:last-child { border-bottom:0; }
-    .importance-track { height:10px; border-radius:3px; background:var(--panel-bg); overflow:hidden; }
-    .importance-fill { height:100%; background:var(--blue); }
-    .report-spotlight { padding:1.25rem 1.35rem; border:2px solid var(--blue); border-radius:12px;
-      background:linear-gradient(135deg,#eef6ff,#ffffff); box-shadow:0 10px 28px rgba(51,149,255,.12); }
-    .report-kicker { color:var(--blue-hover); font-size:.76rem; font-weight:800; letter-spacing:.1em; }
-    .report-spotlight h2 { color:var(--text-dark); margin:.25rem 0 .35rem; font-size:1.45rem; }
-    .report-spotlight p { color:var(--text-muted); margin:0; line-height:1.5; }
-    .policy-spotlight { padding:1.25rem 1.35rem; border:2px solid #d9a441; border-radius:12px;
-      background:linear-gradient(135deg,#fff8ea,#ffffff); box-shadow:0 10px 28px rgba(217,164,65,.14); }
-    .policy-kicker { color:#a5731a; font-size:.76rem; font-weight:800; letter-spacing:.1em; }
-    .policy-spotlight h2 { color:var(--text-dark); margin:.25rem 0 .35rem; font-size:1.45rem; }
-    .policy-spotlight p { color:var(--text-muted); margin:0; line-height:1.5; }
-    .defense-banner { padding:.6rem 1rem; border:1px solid #2f8f5b; border-radius:8px;
-      background:#eafbf1; color:#1c6b41; font-size:.85rem; margin:.75rem 0; }
-    .mock-enforcement-shell { border:3px solid #7b4ce2; border-radius:16px; padding:1.25rem 1.4rem;
-      margin:1rem 0 1.3rem; background:linear-gradient(135deg,#f5f0ff,#ffffff);
-      box-shadow:0 12px 30px rgba(74,43,140,.13); }
-    .mock-enforcement-kicker { color:#6836cf; font-size:.78rem; font-weight:800; letter-spacing:.12em; }
-    .mock-enforcement-shell h2 { color:var(--text-dark); margin:.3rem 0 .35rem; }
-    .mock-enforcement-shell p { color:var(--text-muted); margin:0; line-height:1.5; }
-    .demo-tour { padding:1.35rem 1.45rem; border:2px solid var(--accent); border-radius:12px;
-      margin:0 0 1.35rem; background:linear-gradient(135deg,#eef3f9,#ffffff);
-      box-shadow:0 10px 28px rgba(44,74,124,.1); }
-    .demo-tour-kicker { color:var(--accent); font-size:.76rem; font-weight:800; letter-spacing:.12em; }
-    .demo-tour h2 { color:var(--text-dark); margin:.25rem 0 .35rem; }
-    .demo-tour p { color:var(--text-muted); margin:0; line-height:1.5; }
-    .demo-boundary { padding:.85rem 1rem; border:1px solid #d9a441; border-radius:8px;
-      background:#fff8ea; color:#765516; font-size:.86rem; line-height:1.5; margin:.85rem 0 1rem; }
-    @media (max-width: 800px) {
-      .workflow { grid-template-columns:1fr; }
-      .workflow-step { border-right:0; border-bottom:1px solid var(--border); }
-      .importance-row { grid-template-columns:1fr; gap:.35rem; }
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 st.markdown(
     f"<style>{(PROJECT_ROOT / 'frontend' / 'redesign.css').read_text()}</style>",
     unsafe_allow_html=True,
@@ -171,6 +92,29 @@ DEMO_REVIEW_THRESHOLD = float(os.getenv("DEMO_REVIEW_THRESHOLD", "0.40"))
 RAZORPAY_MOCK_AUTH = os.getenv("RAZORPAY_MOCK_AUTH", "true").lower() == "true"
 THRESHOLD_CURVE_PATH = PROJECT_ROOT / "backend" / "reports" / "metrics" / "threshold_curve.csv"
 GLOBAL_IMPORTANCE_PATH = PROJECT_ROOT / "backend" / "reports" / "metrics" / "global_feature_importance.json"
+
+CASE_STATUS_LABELS = {
+    "open": "Open",
+    "under_investigation": "Under investigation",
+    "confirmed_fraud": "Confirmed fraud",
+    "false_positive": "False positive",
+}
+
+
+def _signal_reasons(row: pd.Series) -> list[str]:
+    """Human-readable reason chips derived from a mock row's own risk signals."""
+    reasons = []
+    velocity = row.get("velocity")
+    if velocity is not None and not pd.isna(velocity) and int(velocity) >= 8:
+        reasons.append(f"{int(velocity)} recent transactions")
+    if row.get("ip_billing_mismatch"):
+        reasons.append("IP/billing mismatch")
+    if row.get("new_device"):
+        reasons.append("New device")
+    deviation = row.get("amount_deviation")
+    if deviation is not None and not pd.isna(deviation) and abs(float(deviation)) >= 50:
+        reasons.append(f"Amount {float(deviation):+.0f}% vs. baseline")
+    return reasons or ["Elevated composite risk score"]
 
 
 def oauth_is_configured() -> bool:
@@ -544,7 +488,7 @@ def _open_demo_view(view: str, payment_id: str | None = None) -> None:
     st.session_state["fraudlens_view"] = view
     if payment_id:
         st.session_state["demo_report_payment_id"] = payment_id
-        st.session_state["chat_payment_id"] = payment_id
+        st.session_state["investigation_payment_id"] = payment_id
 
 
 def render_mock_demo_guide(transactions: pd.DataFrame) -> None:
@@ -599,48 +543,40 @@ def render_mock_demo_guide(transactions: pd.DataFrame) -> None:
         unsafe_allow_html=True,
     )
     st.markdown("#### Shortcuts for the live walkthrough")
-    shortcut_columns = st.columns(5)
+    shortcut_columns = st.columns(4)
     with shortcut_columns[0]:
         st.button(
-            "Inspect risk cases",
-            key="demo_open_transactions",
+            "Open fraud overview",
+            key="demo_open_overview",
             use_container_width=True,
             on_click=_open_demo_view,
-            args=("Transactions",),
+            args=("Fraud overview",),
         )
     with shortcut_columns[1]:
         st.button(
-            "Open evidence report",
-            key="demo_open_report",
+            "Investigate top alert",
+            key="demo_open_investigation",
             type="primary",
             use_container_width=True,
             disabled=report_payment_id is None,
             on_click=_open_demo_view,
-            args=("Transactions", report_payment_id),
+            args=("Transaction investigation", report_payment_id),
         )
     with shortcut_columns[2]:
         st.button(
-            "Open policy audit",
-            key="demo_open_insights",
+            "Explore all transactions",
+            key="demo_open_explorer",
             use_container_width=True,
             on_click=_open_demo_view,
-            args=("Model insights",),
+            args=("Transaction explorer",),
         )
     with shortcut_columns[3]:
         st.button(
-            "Ask AI about a payment",
-            key="demo_open_chat",
+            "Open case management",
+            key="demo_open_cases",
             use_container_width=True,
             on_click=_open_demo_view,
-            args=("Ask about a payment", report_payment_id),
-        )
-    with shortcut_columns[4]:
-        st.button(
-            "Score a transaction",
-            key="demo_open_manual_score",
-            use_container_width=True,
-            on_click=_open_demo_view,
-            args=("Score a transaction",),
+            args=("Case management",),
         )
     st.caption(
         "Review queue (this page) covers Authorized → Approve & capture, Authorized → Confirm fraud & "
@@ -703,77 +639,15 @@ def load_dashboard_transactions(*, show_date_filter: bool = False) -> pd.DataFra
     return payments_frame(st.session_state.get("razorpay_payments", []))
 
 
-def render_evidence_report(filtered: pd.DataFrame) -> None:
-    report_candidates = filtered[filtered["risk_score"].ge(DEMO_BLOCKING_THRESHOLD)]
-    if report_candidates.empty:
-        return
-    st.markdown(
-        """
-        <div class="report-spotlight">
-          <div class="report-kicker">KEY DEMO MOMENT</div>
-          <h2>Go beyond the risk score</h2>
-          <p>The score starts the review; the evidence report explains the decision in plain language
-          and shows the exact synthetic signals behind it. This is an AI-written explanation, not a
-          new model decision.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    payment_id = st.selectbox(
-        "High-risk demo transaction",
-        report_candidates["payment_id"].astype(str).tolist(),
-        key="demo_report_payment_id",
-    )
-    generate = st.button(
-        "Generate full evidence report",
-        type="primary",
-        use_container_width=True,
-    )
-    if generate:
-        row = report_candidates.loc[
-            report_candidates["payment_id"].astype(str).eq(payment_id)
-        ].iloc[0]
-        transaction = {
-            "payment_id": str(row["payment_id"]), "velocity": int(row["velocity"]),
-            "ip_billing_mismatch": bool(row["ip_billing_mismatch"]),
-            "new_device": bool(row["new_device"]),
-            "amount_deviation": float(row["amount_deviation"]),
-            "risk_score": float(row["risk_score"]),
-        }
-        try:
-            with st.spinner("Turning verified signals into a reviewer-ready explanation…"):
-                report = generate_demo_transaction_report(
-                    transaction, SCORING_API_URL, threshold=DEMO_BLOCKING_THRESHOLD
-                )
-            st.session_state["demo_evidence_report"] = {"payment_id": payment_id, "report": report}
-        except ScoringAPIError as exc:
-            st.error(str(exc))
-    saved = st.session_state.get("demo_evidence_report")
-    if saved and saved["payment_id"] == payment_id:
-        report = saved["report"]
-        if report.get("summary"):
-            st.info(report["summary"])
-        elif report.get("error"):
-            st.warning(report["error"])
-        st.dataframe(
-            pd.DataFrame({
-                "Signal": [item["signal"].replace("_", " ").title() for item in report["evidence"]],
-                "Observed evidence": [item["detail"] for item in report["evidence"]],
-            }),
-            use_container_width=True, hide_index=True,
-        )
-        st.caption(report["confidence_note"])
-
-
 def render_transactions_view(transactions: pd.DataFrame, *, is_mock: bool) -> None:
     render_page_header(
-        "Risk review transactions" if is_mock else "Account transactions",
-        "Generated demonstration transactions with per-row risk signals."
+        "Transaction explorer" if is_mock else "Account transactions",
+        "Filterable by date, amount, status, geography, and device across every loaded transaction."
         if is_mock else "Payment history loaded from the connected Razorpay Test Mode account.",
     )
     if is_mock:
         st.info("Demo signals are simulated; they are not real Razorpay fraud findings.")
-    one, two, three = st.columns(3)
+    one, two, three, four = st.columns(4)
     with one:
         search = st.text_input("Search", placeholder="Payment ID, order ID, email…")
         statuses = st.multiselect(
@@ -794,6 +668,16 @@ def render_transactions_view(transactions: pd.DataFrame, *, is_mock: bool) -> No
                 [v for v in ("High risk", "Review", "Low risk") if v in set(transactions["risk_status"])],
             )
         international_only = st.checkbox("International payments only")
+    with four:
+        geography_filter = "Any"
+        device_filter = "Any"
+        if is_mock:
+            geography_filter = st.selectbox(
+                "Geography", ["Any", "Match", "Mismatch"], key="explorer_geography_filter"
+            )
+            device_filter = st.selectbox(
+                "Device", ["Any", "Known", "New"], key="explorer_device_filter"
+            )
     filtered = transactions.copy()
     if search:
         needle = search.casefold()
@@ -811,6 +695,10 @@ def render_transactions_view(transactions: pd.DataFrame, *, is_mock: bool) -> No
         filtered = filtered[filtered["risk_status"].isin(risk_statuses)]
     if international_only:
         filtered = filtered[filtered["international"]]
+    if is_mock and geography_filter != "Any":
+        filtered = filtered[filtered["ip_billing_mismatch"].eq(geography_filter == "Mismatch")]
+    if is_mock and device_filter != "Any":
+        filtered = filtered[filtered["new_device"].eq(device_filter == "New")]
     captured = filtered[filtered["status"].eq("captured")]
     captured_values = captured.groupby("currency")["amount"].sum().to_dict()
     m1, m2, m3, m4 = st.columns(4)
@@ -855,8 +743,11 @@ def render_transactions_view(transactions: pd.DataFrame, *, is_mock: bool) -> No
         "Download filtered transactions", csv_injection_safe(displayed).to_csv(index=False),
         "razorpay_transactions.csv", mime="text/csv",
     )
-    if is_mock and not filtered.empty:
-        render_evidence_report(filtered)
+    if is_mock and filtered["risk_score"].ge(DEMO_BLOCKING_THRESHOLD).any():
+        st.caption(
+            "High-risk rows here can be opened in **Transaction investigation** for the full "
+            "signal breakdown, AI evidence report, and case actions."
+        )
 
 
 def render_global_importance() -> None:
@@ -876,45 +767,57 @@ def render_global_importance() -> None:
     st.markdown(f'<div class="importance-panel">{rows}</div>', unsafe_allow_html=True)
 
 
-def render_model_insights(transactions: pd.DataFrame) -> None:
-    render_page_header("Model insights")
-    st.markdown("### Held-out performance")
+def render_model_transparency_section(transactions: pd.DataFrame) -> None:
+    """The trained model's held-out performance, cost explorer, and global importance.
+
+    Embedded in Fraud overview rather than its own nav item: this is real,
+    static model evaluation content, not something that needs a page of its own.
+    """
+    st.divider()
+    st.markdown("### Held-out model performance")
     evaluation_path = PROJECT_ROOT / "backend" / "reports" / "metrics" / "evaluation.json"
-    evaluation = json.loads(evaluation_path.read_text()) if evaluation_path.exists() else {}
-    metrics = evaluation.get("metrics", evaluation)
     try:
+        evaluation = json.loads(evaluation_path.read_text())
+        selected = evaluation["chosen"]
+        ranking = evaluation["ranking"]
         curve = load_threshold_curve(THRESHOLD_CURVE_PATH)
-        priced = cost_curve_for_ratio(curve, 5, 500)
-        default_policy = cheapest_threshold_row(priced)
-    except (FileNotFoundError, ValueError):
-        curve = None
-        default_policy = {"precision": 0.1335, "recall": 0.7661, "total_cost": 41835}
-    h1, h2, h3, h4 = st.columns(4)
-    h1.metric("Precision", f"{default_policy['precision']:.1%}")
-    h2.metric("Recall", f"{default_policy['recall']:.1%}")
-    h3.metric("PR-AUC", f"{float(metrics.get('average_precision', 0.2982)):.3f}")
-    h4.metric("Expected cost", f"${default_policy['total_cost']:,.0f}")
-    st.info(
-        "Low precision by design: this policy accepts more false alarms to catch more fraud. "
-        "Use the cost controls below to inspect the trade-off."
+    except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        st.info(f"Evaluation artifacts unavailable; run `python -m backend.src.train`. ({exc})")
+        render_global_importance()
+        return
+    h1, h2, h3, h4, h5 = st.columns(5)
+    h1.metric("Precision", f"{selected['precision']:.1%}")
+    h2.metric("Recall", f"{selected['recall']:.1%}")
+    h3.metric("F1", f"{selected['f1']:.1%}")
+    h4.metric("False-positive rate", f"{selected['false_positive_rate']:.1%}")
+    h5.metric("PR-AUC", f"{float(ranking['average_precision']):.3f}")
+    st.caption(
+        f"Newest 30% held-out test window at the validation-selected threshold "
+        f"{selected['threshold']:.3f}. Illustrative error cost: "
+        f"${selected['total_cost']:,.0f}. Synthetic data only."
     )
-    st.markdown("### Cost-of-fraud policy explorer")
-    if curve is None:
-        st.info("Held-out threshold curve unavailable.")
-    else:
-        left, right = st.columns(2)
-        with left:
-            cost_fp = st.slider("False-positive cost ($)", 1, 200, 5)
-        with right:
-            cost_fn = st.slider("False-negative cost ($)", 10, 2000, 500, 10)
-        priced = cost_curve_for_ratio(curve, cost_fp, cost_fn)
-        cheapest = cheapest_threshold_row(priced)
-        p1, p2, p3, p4 = st.columns(4)
-        p1.metric("Cheapest threshold", f"{cheapest['threshold']:.2f}")
-        p2.metric("Precision there", f"{cheapest['precision']:.1%}")
-        p3.metric("Recall there", f"{cheapest['recall']:.1%}")
-        p4.metric("Total held-out cost", f"${cheapest['total_cost']:,.0f}")
-        st.line_chart(priced.set_index("threshold")["total_cost"])
+    st.info(
+        "This is prototype validation on generated labels, not production accuracy. "
+        "SHAP reasons identify model contributors, not proof that a payment is fraudulent."
+    )
+    st.markdown("### Threshold sensitivity explorer")
+    st.caption(
+        "Descriptive what-if analysis on the held-out test set. It does not replace the "
+        "validation-selected threshold and must not be treated as a production policy."
+    )
+    left, right = st.columns(2)
+    with left:
+        cost_fp = st.slider("False-positive cost ($)", 1, 200, 5)
+    with right:
+        cost_fn = st.slider("False-negative cost ($)", 10, 2000, 500, 10)
+    priced = cost_curve_for_ratio(curve, cost_fp, cost_fn)
+    cheapest = cheapest_threshold_row(priced)
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Lowest-cost test point", f"{cheapest['threshold']:.2f}")
+    p2.metric("Precision there", f"{cheapest['precision']:.1%}")
+    p3.metric("Recall there", f"{cheapest['recall']:.1%}")
+    p4.metric("Descriptive cost", f"${cheapest['total_cost']:,.0f}")
+    st.line_chart(priced.set_index("threshold")["total_cost"])
     render_global_importance()
     if transactions["risk_score"].notna().any():
         st.markdown("### Demonstration decision audit")
@@ -928,38 +831,197 @@ def render_model_insights(transactions: pd.DataFrame) -> None:
             risk_audit_rows(transactions, threshold=DEMO_BLOCKING_THRESHOLD),
             use_container_width=True, hide_index=True,
         )
+
+
+def render_fraud_overview(transactions: pd.DataFrame) -> None:
+    """KPIs, a risk trend, and the top open alerts across the loaded window."""
+    render_page_header(
+        "Fraud overview", "Portfolio-level risk posture across the loaded synthetic transactions."
+    )
+    if transactions.empty:
+        st.info("No transactions are loaded for the selected date range.")
+        return
+    if transactions["risk_score"].notna().any():
+        total = len(transactions)
+        fraud = int(transactions["actual"].eq("Fraud").sum())
+        flagged = int(transactions["risk_status"].eq("High risk").sum())
+        o1, o2, o3, o4 = st.columns(4)
+        o1.metric("Total transactions", f"{total:,}")
+        o2.metric("Labelled fraud (synthetic)", f"{fraud:,}")
+        o3.metric("Labelled legitimate", f"{total - fraud:,}")
+        o4.metric("Flagged high risk", f"{flagged:,}")
+        st.caption(
+            "Fraud/legitimate labels are synthetic ground truth revealed only to evaluate the demo; "
+            "they are not real Razorpay findings."
+        )
+
+        st.markdown("### Risk trend")
+        trend = (
+            transactions.sort_values("created_at")
+            .set_index("created_at")["risk_score"]
+            .rolling(5, min_periods=1).mean()
+        )
+        st.line_chart(trend, height=220)
+        st.caption("5-transaction rolling average risk score over the loaded window.")
+
+        st.markdown("### Top alerts")
+        top_alerts = transactions.sort_values("risk_score", ascending=False).head(5)
+        for _, row in top_alerts.iterrows():
+            left, right = st.columns([5, 1.4], vertical_alignment="center")
+            with left:
+                st.markdown(
+                    f"**{row['payment_id']}** · score **{row['risk_score']:.3f}** "
+                    f"({row['risk_status']})  \n{' · '.join(_signal_reasons(row))}"
+                )
+            with right:
+                st.button(
+                    "Investigate →", key=f"overview_investigate_{row['payment_id']}",
+                    use_container_width=True, on_click=_open_demo_view,
+                    args=("Transaction investigation", str(row["payment_id"])),
+                )
+    else:
+        st.info(
+            "Fraud overview needs scored transactions. Real Razorpay payments have no FraudLens "
+            "score because the Payments API does not supply the required signals."
+        )
+    render_model_transparency_section(transactions)
     st.markdown(
-        '<div class="defense-banner">Defense-only: these views explain and prioritize existing signals '
-        'for human review. They never automatically capture or refund a payment.</div>',
+        '<div class="defense-banner">Defense-only: this view explains and prioritizes existing '
+        'signals for human review. It never automatically captures or refunds a payment.</div>',
         unsafe_allow_html=True,
     )
 
 
-def render_chat_view(transactions: pd.DataFrame) -> None:
-    render_page_header("Ask about a payment", "Ask questions using only the selected transaction's fields.")
+def render_fraud_alerts(transactions: pd.DataFrame) -> None:
+    """Prioritized review queue for every transaction above the review threshold."""
+    render_page_header(
+        "Fraud review queue",
+        "Start with high-priority transactions, inspect the evidence, and record a human decision.",
+    )
     if transactions.empty:
-        st.info("No transaction is available for chat.")
+        st.info("No transactions are loaded for the selected date range.")
         return
-    payment_id = st.selectbox(
-        "Transaction", transactions["payment_id"].astype(str).tolist(), key="chat_payment_id"
+    if not transactions["risk_score"].notna().any():
+        st.info(
+            "Alerts need scored transactions. Real Razorpay payments have no FraudLens score because "
+            "the Payments API does not supply the required signals."
+        )
+        return
+    alerts = transactions[transactions["risk_score"].ge(DEMO_REVIEW_THRESHOLD)].sort_values(
+        ["risk_score", "created_at"], ascending=[False, False]
     )
-    row = transactions.loc[transactions["payment_id"].astype(str).eq(payment_id)].iloc[0]
+    if alerts.empty:
+        st.success("No transactions are at or above the review threshold in this window.")
+        return
+    high_priority = alerts["risk_score"].ge(DEMO_BLOCKING_THRESHOLD)
+    high_count = int(high_priority.sum())
+    review_count = len(alerts) - high_count
     st.markdown(
-        f"**{row['status'].title()}** · {row['currency']} {row['amount']:,.2f} · "
-        f"{row['method'].title()} · {row['created_at']:%d %b %Y, %H:%M UTC}"
+        f"""
+        <div class="alert-queue-guide">
+          <div>
+            <strong>How to use this queue</strong>
+            <span>Risk score ranks review urgency—it is not proof of fraud.</span>
+          </div>
+          <div class="alert-guide-bands">
+            <span class="alert-band alert-band-high">High priority · {DEMO_BLOCKING_THRESHOLD:.0%}–100%</span>
+            <span class="alert-band alert-band-review">Needs review · {DEMO_REVIEW_THRESHOLD:.0%}–{DEMO_BLOCKING_THRESHOLD - .01:.0%}</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
+
+    a1, a2, a3 = st.columns(3)
+    a1.metric("Needs analyst review", f"{len(alerts):,}", help=f"Risk score at or above {DEMO_REVIEW_THRESHOLD:.0%}")
+    a2.metric("High priority", f"{high_count:,}", help=f"Risk score at or above {DEMO_BLOCKING_THRESHOLD:.0%}")
+    a3.metric("Review band", f"{review_count:,}", help=f"Risk score from {DEMO_REVIEW_THRESHOLD:.0%} to {DEMO_BLOCKING_THRESHOLD - .01:.0%}")
+
+    filter_col, count_col = st.columns([3, 1], vertical_alignment="bottom")
+    with filter_col:
+        priority_filter = st.radio(
+            "Show alerts",
+            ["High priority", "All alerts", "Review band"],
+            horizontal=True,
+            key="fraud_alert_priority_filter",
+        )
+    if priority_filter == "High priority":
+        visible_alerts = alerts.loc[high_priority]
+    elif priority_filter == "Review band":
+        visible_alerts = alerts.loc[~high_priority]
+    else:
+        visible_alerts = alerts
+    with count_col:
+        st.caption(f"Showing **{len(visible_alerts):,}** of **{len(alerts):,}** alerts")
+
+    for _, row in visible_alerts.iterrows():
+        score = float(row["risk_score"])
+        is_high = score >= DEMO_BLOCKING_THRESHOLD
+        priority_label = "HIGH PRIORITY" if is_high else "NEEDS REVIEW"
+        priority_class = "high" if is_high else "review"
+        next_step = (
+            "Review the evidence before fulfillment and record the case outcome."
+            if is_high else
+            "Check customer context and escalate only when the evidence supports it."
+        )
+        reason_chips = "".join(
+            f'<span class="alert-reason-chip">{escape(reason)}</span>'
+            for reason in _signal_reasons(row)
+        )
+        created_at = pd.Timestamp(row["created_at"])
+        with st.container(border=True):
+            st.markdown(
+                f'<span class="alert-card-anchor alert-card-{priority_class}"></span>',
+                unsafe_allow_html=True,
+            )
+            details, action = st.columns([5, 1.45], vertical_alignment="center")
+            with details:
+                st.markdown(
+                    f"""
+                    <div class="alert-card-header">
+                      <span class="alert-priority alert-priority-{priority_class}">{priority_label}</span>
+                      <span class="alert-risk-score"><strong>{score:.0%}</strong> risk score</span>
+                    </div>
+                    <div class="alert-payment-line">
+                      <strong>{escape(str(row['currency']))} {float(row['amount']):,.2f}</strong>
+                      <span>{escape(str(row['payment_id']))}</span>
+                    </div>
+                    <div class="alert-payment-meta">
+                      {escape(str(row['method']).title())} · {escape(str(row['status']).title())} ·
+                      {created_at:%d %b %Y, %H:%M UTC}
+                    </div>
+                    <div class="alert-reason-label">WHY IT WAS FLAGGED</div>
+                    <div class="alert-reason-list">{reason_chips}</div>
+                    <div class="alert-next-step"><strong>Next step:</strong> {next_step}</div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            with action:
+                st.button(
+                    "Review transaction →",
+                    key=f"alert_investigate_{row['payment_id']}",
+                    type="primary" if is_high else "secondary",
+                    use_container_width=True,
+                    on_click=_open_demo_view,
+                    args=("Transaction investigation", str(row["payment_id"])),
+                )
+
+
+def _render_transaction_chat(row: pd.Series) -> None:
+    st.markdown("### Ask AI about this transaction")
+    payment_id = str(row["payment_id"])
     chats = st.session_state.setdefault("razorpay_transaction_chats", {})
     history = chats.setdefault(payment_id, [])
     for message in history:
         with st.chat_message(message["role"]):
             st.write(message["content"])
-    question = st.chat_input(f"Ask about {payment_id}", key="razorpay_transaction_question")
+    question = st.chat_input(f"Ask about {payment_id}", key="investigation_question")
     if not question:
         return
     prior = history[-8:]
     history.append({"role": "user", "content": question})
     context = {
-        "payment_id": str(row["payment_id"]), "transaction_id": str(row["payment_id"]),
+        "payment_id": payment_id, "transaction_id": payment_id,
         "timestamp": row["created_at"].isoformat(), "amount": float(row["amount"]),
         "currency": str(row["currency"]), "status": str(row["status"]),
         "method": str(row["method"]), "order_id": str(row["order_id"]),
@@ -982,113 +1044,204 @@ def render_chat_view(transactions: pd.DataFrame) -> None:
     st.rerun()
 
 
-def render_manual_scoring_view() -> None:
-    render_page_header(
-        "Score a transaction",
-        "Enter raw payment fields, run the trained model, then ask AI about its saved evidence.",
-    )
-    st.info(
-        "Enter raw transaction data. The backend derives velocity, amount deviation, device history, "
-        "geography mismatch, and recency from transactions scored earlier in this running session."
-    )
-    default_id = st.session_state.setdefault(
-        "manual_transaction_id",
-        f"manual_{pd.Timestamp.now(tz='UTC').strftime('%Y%m%d%H%M%S')}",
-    )
-    with st.form("manual_score_form"):
-        left, middle, right = st.columns(3)
-        with left:
-            transaction_id = st.text_input("Transaction ID", value=default_id)
-            timestamp = st.text_input(
-                "Timestamp (UTC)", value=pd.Timestamp.now(tz="UTC").isoformat()
-            )
-            amount = st.number_input("Amount", min_value=0.0, value=1499.0, step=1.0)
-        with middle:
-            user_id = st.text_input("User ID", value="user_demo")
-            device_id = st.text_input("Device ID", value="device_demo")
-            card_id = st.text_input("Card ID", value="card_demo")
-        with right:
-            billing_country = st.text_input("Billing country", value="IN")
-            ip_country = st.text_input("IP country", value="IN")
-            merchant_category = st.text_input("Merchant category", value="electronics")
-        submitted = st.form_submit_button(
-            "Run fraud model", type="primary", use_container_width=True
-        )
+def _render_case_actions(row: pd.Series) -> None:
+    payment_id = str(row["payment_id"])
+    st.markdown("### Case status")
+    try:
+        payload = get_fraud_case(payment_id, SCORING_API_URL)
+        case, notes = payload.get("case"), payload.get("notes") or []
+    except ScoringAPIError as exc:
+        st.warning(f"Case storage unavailable: {exc}")
+        case, notes = None, []
+    current_status = case["status"] if case else "open"
+    updated_by = f" · last updated by {case['updated_by']}" if case and case.get("updated_by") else ""
+    st.caption(f"Current status: **{CASE_STATUS_LABELS.get(current_status, current_status)}**{updated_by}")
 
-    if submitted:
-        transaction = pd.DataFrame([{
-            "transaction_id": transaction_id.strip(),
-            "timestamp": timestamp.strip(),
-            "user_id": user_id.strip(),
-            "device_id": device_id.strip(),
-            "card_id": card_id.strip(),
-            "amount": float(amount),
-            "billing_country": billing_country.strip().upper(),
-            "ip_country": ip_country.strip().upper(),
-            "merchant_category": merchant_category.strip(),
-        }])
+    analyst = st.text_input(
+        "Analyst name", key="investigation_analyst_name", placeholder="Name or work email"
+    )
+    status_cols = st.columns(3)
+    with status_cols[0]:
+        mark_investigating = st.button(
+            "Mark under investigation", use_container_width=True, key=f"case_investigating_{payment_id}"
+        )
+    with status_cols[1]:
+        mark_fraud = st.button(
+            "Confirm fraud", use_container_width=True, key=f"case_fraud_{payment_id}"
+        )
+    with status_cols[2]:
+        mark_false_positive = st.button(
+            "Mark false positive", use_container_width=True, key=f"case_fp_{payment_id}"
+        )
+    action = (
+        "under_investigation" if mark_investigating
+        else "confirmed_fraud" if mark_fraud
+        else "false_positive" if mark_false_positive
+        else None
+    )
+    if action:
         try:
-            scored = score_uploaded_transactions(transaction, SCORING_API_URL)
-            st.session_state["manual_scored_transaction"] = scored.iloc[0].to_dict()
-            st.session_state["manual_transaction_id"] = transaction_id.strip()
-            st.session_state.setdefault("manual_transaction_chats", {}).setdefault(
-                transaction_id.strip(), []
-            )
-        except (ScoringAPIError, ValueError) as exc:
+            risk_score = None if pd.isna(row["risk_score"]) else float(row["risk_score"])
+            set_fraud_case_status(payment_id, action, SCORING_API_URL, actor=analyst, risk_score=risk_score)
+            st.success(f"Case marked {CASE_STATUS_LABELS[action]}.")
+            st.rerun()
+        except ScoringAPIError as exc:
             st.error(str(exc))
 
-    result = st.session_state.get("manual_scored_transaction")
-    if not result:
-        st.caption("Start the backend, complete the form, and click Run fraud model.")
-        return
+    note_text = st.text_area("Add a note", key=f"case_note_{payment_id}", placeholder="Investigation notes…")
+    if st.button("Save note", key=f"case_save_note_{payment_id}"):
+        if note_text.strip():
+            try:
+                add_fraud_case_note(payment_id, note_text, SCORING_API_URL, author=analyst)
+                st.success("Note saved.")
+                st.rerun()
+            except ScoringAPIError as exc:
+                st.error(str(exc))
+        else:
+            st.warning("Write a note before saving.")
 
-    score = float(result["score"])
-    flagged = bool(result["flagged"])
-    metric_left, metric_right = st.columns(2)
-    metric_left.metric("Risk score", f"{score:.3f}")
-    metric_right.metric(
-        "Model result", "Flagged for review" if flagged else "Below review threshold"
+    if notes:
+        st.markdown("#### Notes")
+        for note in notes:
+            st.markdown(f"**{note.get('author') or 'Analyst'}** · {note.get('created_at', '')}  \n{note['note']}")
+
+
+def render_transaction_investigation(transactions: pd.DataFrame, *, is_mock: bool) -> None:
+    """Full signal detail, the AI evidence report, grounded chat, and case actions for one transaction."""
+    render_page_header(
+        "Transaction investigation",
+        "Full signal detail, the AI evidence report, grounded chat, and case actions for one transaction.",
     )
-    reasons = list(result.get("reasons") or [])
-    if reasons:
-        st.markdown("#### Recorded model reasons")
-        for reason in reasons:
-            st.write(f"- {reason}")
+    if transactions.empty:
+        st.info("No transactions are loaded for the selected date range.")
+        return
+    options = transactions.sort_values(
+        "risk_score", ascending=False, na_position="last"
+    )["payment_id"].astype(str).tolist()
+    if st.session_state.get("investigation_payment_id") not in options:
+        st.session_state["investigation_payment_id"] = options[0]
+    payment_id = st.selectbox("Transaction", options, key="investigation_payment_id")
+    row = transactions.loc[transactions["payment_id"].astype(str).eq(payment_id)].iloc[0]
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Risk score", "n/a" if pd.isna(row["risk_score"]) else f"{float(row['risk_score']):.3f}")
+    m2.metric("Risk status", "n/a" if pd.isna(row["risk_status"]) else str(row["risk_status"]))
+    m3.metric("Payment status", str(row["status"]).title())
+    st.caption(
+        f"{row['currency']} {row['amount']:,.2f} · {row['method'].title()} · "
+        f"{row['created_at']:%d %b %Y, %H:%M UTC}"
+    )
+
+    if pd.isna(row["risk_score"]):
+        st.info(
+            "This is a real Razorpay payment. The Payments API does not supply device history, IP "
+            "geography, velocity, or fraud labels, so no FraudLens signals or score are shown."
+        )
     else:
-        st.caption("No elevated SHAP reason codes were recorded for this transaction.")
-    st.warning(
-        "This is an uncalibrated risk score for human review, not proof that the payment is fraudulent."
-    )
+        st.markdown("### Fraud signals")
+        st.dataframe(
+            pd.DataFrame({
+                "Signal": ["Transaction velocity", "IP/billing geography", "Device history", "Amount deviation"],
+                "Observed value": [
+                    f"{int(row['velocity'])} recent transactions",
+                    "Mismatch" if row["ip_billing_mismatch"] else "Match",
+                    "New device" if row["new_device"] else "Known device",
+                    f"{float(row['amount_deviation']):+.0f}% vs. customer baseline",
+                ],
+            }),
+            use_container_width=True, hide_index=True,
+        )
 
-    transaction_id = str(result["transaction_id"])
-    st.markdown("### Ask about this scored transaction")
-    history = st.session_state.setdefault("manual_transaction_chats", {}).setdefault(
-        transaction_id, []
+        st.markdown("### AI evidence report")
+        if float(row["risk_score"]) < DEMO_BLOCKING_THRESHOLD:
+            st.caption(
+                "The AI evidence report is available once a transaction is at or above the "
+                f"auto-block threshold ({DEMO_BLOCKING_THRESHOLD:.2f}); this one is below it."
+            )
+        else:
+            if st.button("Generate full evidence report", type="primary", key="investigation_generate_report"):
+                transaction = {
+                    "payment_id": payment_id, "velocity": int(row["velocity"]),
+                    "ip_billing_mismatch": bool(row["ip_billing_mismatch"]),
+                    "new_device": bool(row["new_device"]),
+                    "amount_deviation": float(row["amount_deviation"]),
+                    "risk_score": float(row["risk_score"]),
+                }
+                try:
+                    with st.spinner("Turning verified signals into a reviewer-ready explanation…"):
+                        report = generate_demo_transaction_report(
+                            transaction, SCORING_API_URL, threshold=DEMO_BLOCKING_THRESHOLD
+                        )
+                    st.session_state["demo_evidence_report"] = {"payment_id": payment_id, "report": report}
+                except ScoringAPIError as exc:
+                    st.error(str(exc))
+            saved = st.session_state.get("demo_evidence_report")
+            if saved and saved["payment_id"] == payment_id:
+                report = saved["report"]
+                if report.get("summary"):
+                    st.info(report["summary"])
+                elif report.get("error"):
+                    st.warning(report["error"])
+                st.dataframe(
+                    pd.DataFrame({
+                        "Signal": [item["signal"].replace("_", " ").title() for item in report["evidence"]],
+                        "Observed evidence": [item["detail"] for item in report["evidence"]],
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption(report["confidence_note"])
+
+    if is_mock:
+        _render_case_actions(row)
+    else:
+        st.caption("Case management is available in the synthetic demo.")
+
+    _render_transaction_chat(row)
+
+
+def render_case_management() -> None:
+    """A filterable log of every transaction an analyst has marked, linking back to Investigation."""
+    render_page_header(
+        "Case management", "Every transaction an analyst has marked, filterable by status."
     )
-    for message in history:
-        with st.chat_message(message["role"]):
-            st.write(message["content"])
-    question = st.chat_input(
-        f"Ask why {transaction_id} received this score",
-        key="manual_transaction_question",
+    status_label = st.selectbox(
+        "Status", ["All"] + list(CASE_STATUS_LABELS.values()), key="case_management_status_filter"
     )
-    if not question:
-        return
-    prior = history[-8:]
-    history.append({"role": "user", "content": question})
+    status_value = None
+    if status_label != "All":
+        status_value = next(key for key, label in CASE_STATUS_LABELS.items() if label == status_label)
     try:
-        response = ask_transaction_question(
-            transaction_id, question, prior, SCORING_API_URL
-        )
-        answer = (
-            response["answer"]
-            if response["status"] == "generated"
-            else response.get("error", "Unable to answer.")
-        )
+        cases = list_fraud_cases(SCORING_API_URL, status=status_value)
     except ScoringAPIError as exc:
-        answer = str(exc)
-    history.append({"role": "assistant", "content": answer})
-    st.rerun()
+        st.error(str(exc))
+        return
+    if not cases:
+        st.info("No cases have been opened yet. Mark a transaction from Transaction investigation to start one.")
+        return
+    table = pd.DataFrame([
+        {
+            "Transaction": case["transaction_id"],
+            "Status": CASE_STATUS_LABELS.get(case["status"], case["status"]),
+            "Risk score": case.get("risk_score"),
+            "Updated by": case.get("updated_by") or "—",
+            "Updated at": case.get("updated_at"),
+        }
+        for case in cases
+    ])
+    st.dataframe(
+        table, use_container_width=True, hide_index=True,
+        column_config={"Risk score": st.column_config.NumberColumn("Risk score", format="%.3f")},
+    )
+    jump_left, jump_right = st.columns([3, 1], vertical_alignment="bottom")
+    with jump_left:
+        jump_to = st.selectbox(
+            "Open a case in Transaction investigation", table["Transaction"].tolist(), key="case_management_jump"
+        )
+    with jump_right:
+        st.button(
+            "Open →", type="primary", use_container_width=True,
+            on_click=_open_demo_view, args=("Transaction investigation", jump_to),
+        )
 
 
 def render_account_view(connection: dict) -> None:
@@ -1162,17 +1315,22 @@ if not is_mock_session and connection.get("razorpay_account_id"):
         st.rerun()
 with st.sidebar:
     st.markdown(
-        brand_lockup(text_size="1.2rem", text_color="#16233D", stroke="#2C4A7C"),
+        brand_lockup(text_size="1.2rem", text_color="#16233D", stroke="#5D94FC"),
         unsafe_allow_html=True,
     )
-    navigation = [
-        "Review queue",
-        "Score a transaction",
-        "Transactions",
-        "Model insights",
-        "Ask about a payment",
-        "Razorpay account",
-    ]
+    # Streamlit renders `:material/name:` shortcodes in widget labels as real
+    # Material Symbols vector icons (see streamlit.material_icon_names for
+    # the valid name list), not emoji glyphs.
+    navigation_icons = {
+        "Review queue": "shield",
+        "Fraud overview": "monitoring",
+        "Fraud alerts": "notifications_active",
+        "Transaction explorer": "travel_explore",
+        "Transaction investigation": "manage_search",
+        "Case management": "folder_open",
+        "Razorpay account": "account_balance_wallet",
+    }
+    navigation = list(navigation_icons)
     if st.session_state.get("fraudlens_view") not in navigation:
         st.session_state["fraudlens_view"] = navigation[0]
     view = st.radio(
@@ -1180,7 +1338,7 @@ with st.sidebar:
         navigation,
         index=0,
         key="fraudlens_view",
-        format_func=lambda item: f"●  {item}",
+        format_func=lambda item: f":material/{navigation_icons[item]}:  {item}",
     )
     st.markdown(
         '<div class="defense-footer">Defense-only. No model decision automatically changes a payment.</div>',
@@ -1191,9 +1349,14 @@ top_left, top_right = st.columns([4, 1], vertical_alignment="center")
 account_id = connection.get("razorpay_account_id", "")
 connection_name = "Demo mode" if is_mock_session else "Razorpay connected"
 with top_left:
+    connection_detail = (
+        "Synthetic UI fixtures · rule-based demo scores"
+        if is_mock_session
+        else account_id
+    )
     st.markdown(
         f'<div class="connection-bar"><span class="connection-led"></span>{connection_name} · '
-        f'{"Synthetic transactions" if is_mock_session else account_id}</div>',
+        f'{connection_detail}</div>',
         unsafe_allow_html=True,
     )
 disconnect = False
@@ -1225,21 +1388,19 @@ if view == "Review queue":
     else:
         render_page_header("Review queue", "Human-approved Test Mode capture and refund actions.")
         render_enforcement_panel(connection)
-elif view == "Score a transaction":
-    render_manual_scoring_view()
 elif view == "Razorpay account":
     render_account_view(connection)
+elif view == "Case management":
+    render_case_management()
 else:
-    transactions = load_dashboard_transactions(show_date_filter=view == "Transactions")
+    transactions = load_dashboard_transactions(show_date_filter=view == "Transaction explorer")
     if transactions.empty:
         st.info("No transactions were found for the selected date range.")
-    elif view == "Transactions":
+    elif view == "Fraud overview":
+        render_fraud_overview(transactions)
+    elif view == "Fraud alerts":
+        render_fraud_alerts(transactions)
+    elif view == "Transaction explorer":
         render_transactions_view(transactions, is_mock=is_mock_session)
-    elif view == "Model insights":
-        if is_mock_session:
-            render_model_insights(transactions)
-        else:
-            render_page_header("Model insights")
-            st.info("Model insights are available only for the synthetic dataset with required risk signals.")
-    else:
-        render_chat_view(transactions)
+    elif view == "Transaction investigation":
+        render_transaction_investigation(transactions, is_mock=is_mock_session)

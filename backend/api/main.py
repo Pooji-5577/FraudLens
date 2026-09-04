@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 from backend.src.score import FraudScorer
+from backend.src.case_store import CaseStore
 from backend.src.razorpay_enforcement import ReviewStore, verify_webhook_signature
 from backend.src.review_store import (
     SupabaseReviewStore,
@@ -70,6 +71,24 @@ class PreviewTransactionChatRequest(TransactionChatRequest):
 class DemoReportRequest(BaseModel):
     transaction: dict[str, Any]
     threshold: float = Field(default=.65, ge=0, le=1)
+
+
+class CaseStatusRequest(BaseModel):
+    status: str
+    actor: str = ""
+    risk_score: float | None = None
+
+
+class CaseNoteRequest(BaseModel):
+    note: str = Field(min_length=1, max_length=4_000)
+    author: str = ""
+
+
+def _case_store() -> CaseStore:
+    try:
+        return CaseStore.from_environment()
+    except SupabaseStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/health")
@@ -237,3 +256,42 @@ def chat_about_preview_transaction(request: PreviewTransactionChatRequest) -> di
             detail="Transaction chat is unavailable because Azure OpenAI is not configured.",
         )
     return generated
+
+
+@app.get("/cases", response_model=list[dict[str, Any]])
+def list_cases(status: str | None = None) -> list[dict]:
+    try:
+        return _case_store().list_cases(status=status)
+    except SupabaseStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/cases/{transaction_id}", response_model=dict[str, Any])
+def get_case(transaction_id: str) -> dict:
+    try:
+        store = _case_store()
+        return {"case": store.get_case(transaction_id), "notes": store.list_notes(transaction_id)}
+    except SupabaseStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/cases/{transaction_id}/status", response_model=dict[str, Any])
+def set_case_status(transaction_id: str, request: CaseStatusRequest) -> dict:
+    try:
+        return _case_store().set_status(
+            transaction_id, request.status, actor=request.actor, risk_score=request.risk_score
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SupabaseStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/cases/{transaction_id}/notes", response_model=dict[str, Any])
+def add_case_note(transaction_id: str, request: CaseNoteRequest) -> dict:
+    try:
+        return _case_store().add_note(transaction_id, request.note, author=request.author)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SupabaseStoreError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc

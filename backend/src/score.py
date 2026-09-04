@@ -32,6 +32,13 @@ class FraudScorer:
             featured = engineer_features(transactions, self.state)
             probabilities = self.model.predict_proba(model_matrix(featured))[:, 1]
             reasons = explain_flagged(self.explanation_model, featured, probabilities, self.threshold)
+            for index, probability in enumerate(probabilities):
+                decision = (
+                    f"Score {probability:.3f} met the {self.threshold:.3f} review threshold"
+                    if probability >= self.threshold
+                    else f"Score {probability:.3f} stayed below the {self.threshold:.3f} review threshold"
+                )
+                reasons[index] = [*reasons[index], decision]
         result = featured.copy().reset_index(drop=True)
         result["score"] = probabilities
         result["flagged"] = probabilities >= self.threshold

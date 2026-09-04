@@ -1,4 +1,4 @@
-"""Regenerate data, tune models temporally, select the winner, and evaluate."""
+"""Regenerate synthetic data, tune temporally, lock policy, and evaluate once."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from backend.src.benchmark import (
     write_benchmark_artifacts,
 )
 from backend.src.calibration import TemporalCalibratedClassifier
-from backend.src.evaluate import write_evaluation_artifacts
+from backend.src.evaluate import best_cost_threshold, sweep_thresholds, write_evaluation_artifacts
 from backend.src.features import MODEL_FEATURES, engineer_features, model_matrix
 from backend.src.tune import make_xgboost, temporal_xgboost_search
 
@@ -61,11 +61,23 @@ def train_pipeline(
         "max_depth": best["max_depth"],
         "n_estimators": best["n_estimators"],
         "learning_rate": best["learning_rate"],
+        "min_child_weight": best["min_child_weight"],
+        "subsample": best["subsample"],
+        "colsample_bytree": best["colsample_bytree"],
+        "gamma": best["gamma"],
+        "reg_alpha": best["reg_alpha"],
+        "reg_lambda": best["reg_lambda"],
+        "max_delta_step": best["max_delta_step"],
     }
 
     calibration_base = make_xgboost(search_params, seed)
     calibration_base.fit(x_search_fit, y_search_fit)
     validation_raw = calibration_base.predict_proba(x_validation)[:, 1]
+    validation_curve = sweep_thresholds(
+        y_validation, validation_raw, cost_fp=5.0, cost_fn=500.0
+    )
+    validation_policy = best_cost_threshold(validation_curve)
+    decision_threshold = float(validation_policy["threshold"])
     calibrator = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
     calibrator.fit(validation_raw, y_validation)
 
@@ -95,40 +107,50 @@ def train_pipeline(
     comparison = compare_probability_sets(y_test, probability_sets)
     write_benchmark_artifacts(comparison, report_path)
 
-    winner_name = str(comparison.iloc[0]["model"])
-    models = {
-        "logistic_regression": baselines["logistic_regression"],
-        "random_forest": baselines["random_forest"],
-        "tuned_xgboost_uncalibrated": tuned_xgboost,
-        "tuned_xgboost_calibrated": calibrated_xgboost,
+    # The test-set ranking above is descriptive. It must not choose the deployed
+    # artifact. The production family is the temporally tuned, uncalibrated
+    # XGBoost model, and its operating threshold was locked on validation data.
+    production_model_name = "tuned_xgboost_uncalibrated"
+    validation_selection = {
+        "threshold": decision_threshold,
+        "rows": int(len(validation)),
+        "started": str(validation["timestamp"].min()),
+        "ended": str(validation["timestamp"].max()),
+        "metrics": validation_policy,
     }
-    explanation_models = {
-        "logistic_regression": baselines["logistic_regression"],
-        "random_forest": baselines["random_forest"],
-        "tuned_xgboost_uncalibrated": tuned_xgboost,
-        "tuned_xgboost_calibrated": tuned_xgboost,
-    }
-    winning_model = models[winner_name]
-    winning_probabilities = probability_sets[winner_name]
-    summary = write_evaluation_artifacts(y_test, winning_probabilities, report_path)
+    summary = write_evaluation_artifacts(
+        y_test,
+        xgboost_raw_probabilities,
+        report_path,
+        decision_threshold=decision_threshold,
+        validation_selection=validation_selection,
+    )
     summary["evaluation_period"] = {
         "started": str(test["timestamp"].min()),
         "ended": str(test["timestamp"].max()),
-        "currency": "USD",
+        "cost_unit": "illustrative dollars; not observed loss",
     }
     summary["model_comparison"] = comparison.to_dict(orient="records")
-    summary["production_model"] = winner_name
+    summary["model_comparison_use"] = (
+        "descriptive held-out benchmark only; not used to select the saved model"
+    )
+    summary["production_model"] = production_model_name
+    summary["production_model_selection"] = (
+        "XGBoost hyperparameters selected by expanding temporal validation; "
+        "the held-out test ranking did not select the saved model"
+    )
     summary["xgboost_search_best"] = best
     (report_path / "metrics" / "evaluation.json").write_text(
         json.dumps(summary, indent=2) + "\n"
     )
 
     artifact = {
-        "model": winning_model,
-        "explanation_model": explanation_models[winner_name],
-        "model_name": winner_name,
+        "model": tuned_xgboost,
+        "explanation_model": tuned_xgboost,
+        "model_name": production_model_name,
         "feature_names": MODEL_FEATURES,
-        "threshold": summary["chosen"]["threshold"],
+        "threshold": decision_threshold,
+        "threshold_selected_on": "validation",
         "cost_fp": summary["cost_fp"],
         "cost_fn": summary["cost_fn"],
         "training_ended": str(train["timestamp"].max()),
@@ -139,7 +161,8 @@ def train_pipeline(
     }
     joblib.dump(artifact, model_path)
     print(json.dumps(summary, indent=2))
-    print(f"selected production model: {winner_name}")
+    print(f"production model: {production_model_name}")
+    print(f"validation-selected threshold: {decision_threshold:.3f}")
     print(f"saved model to {model_path}")
     return summary
 

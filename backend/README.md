@@ -2,6 +2,8 @@
 
 The backend contains the FastAPI application, model pipeline, payment-enforcement implementation, generated data, trained model, and evaluation artifacts.
 
+The model is a hackathon prototype trained and evaluated only on seeded synthetic data. Its metrics are not production accuracy claims, and it is not connected to live Razorpay fraud prevention or automatic payment decisions.
+
 From the repository root:
 
 ```bash

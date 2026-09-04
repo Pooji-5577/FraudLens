@@ -42,6 +42,17 @@ def test_expected_prior_history_values():
     assert featured.loc[2, "card_txn_count_24h"] == 2
     assert featured.loc[2, "geo_mismatch"] == 1
     assert featured.loc[2, "is_new_device"] == 1
+    assert featured.loc[2, "amount_to_user_mean_ratio"] == pytest.approx(500 / 110)
+    assert featured.loc[2, "geo_new_device"] == 1
+    assert featured.loc[2, "geo_amount_ratio"] == pytest.approx(500 / 110)
+    assert featured.loc[2, "new_device_amount_ratio"] == pytest.approx(500 / 110)
+
+
+def test_combination_features_are_neutral_without_prior_history():
+    featured = engineer_features(_rows().iloc[[0]])
+    assert featured.loc[0, "amount_to_user_mean_ratio"] == 1
+    assert featured.loc[0, "geo_new_device"] == 0
+    assert featured.loc[0, "rapid_repeat"] == 0
 
 
 def test_state_rejects_out_of_order_or_repeated_timestamps():

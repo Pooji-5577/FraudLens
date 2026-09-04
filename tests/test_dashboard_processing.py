@@ -282,9 +282,9 @@ def test_preview_transaction_question_sends_visible_row_without_scoring():
 
 def _threshold_curve():
     return pd.DataFrame([
-        {"threshold": 0.1, "precision": 0.05, "recall": 0.95, "f1": 0.09, "tp": 190, "fp": 3610, "tn": 11095, "fn": 10},
-        {"threshold": 0.5, "precision": 0.20, "recall": 0.60, "f1": 0.30, "tp": 120, "fp": 480, "tn": 14225, "fn": 80},
-        {"threshold": 0.9, "precision": 0.60, "recall": 0.10, "f1": 0.17, "tp": 20, "fp": 13, "tn": 14692, "fn": 180},
+        {"threshold": 0.1, "precision": 0.05, "recall": 0.95, "f1": 0.09, "false_positive_rate": 3610 / 14705, "tp": 190, "fp": 3610, "tn": 11095, "fn": 10},
+        {"threshold": 0.5, "precision": 0.20, "recall": 0.60, "f1": 0.30, "false_positive_rate": 480 / 14705, "tp": 120, "fp": 480, "tn": 14225, "fn": 80},
+        {"threshold": 0.9, "precision": 0.60, "recall": 0.10, "f1": 0.17, "false_positive_rate": 13 / 14705, "tp": 20, "fp": 13, "tn": 14692, "fn": 180},
     ])
 
 

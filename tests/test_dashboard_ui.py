@@ -70,7 +70,7 @@ def test_demo_dashboard_opens_transaction_dashboard_without_credentials(monkeypa
         "Low risk / allowed", "Review band", "High risk / report", "False positive", "False negative"
     ]
 
-    navigate(app, "Transactions")
+    navigate(app, "Transaction explorer")
     assert not app.exception
     assert len(app.dataframe) == 1
     assert len(app.dataframe[0].value) == 80
@@ -81,28 +81,36 @@ def test_demo_dashboard_opens_transaction_dashboard_without_credentials(monkeypa
     assert {"Transactions", "Captured", "Failed", "Captured value"} == {
         metric.label for metric in app.metric
     }
-    report_buttons = [
-        button for button in app.button if button.label == "Generate full evidence report"
-    ]
-    assert len(report_buttons) == 1
+    assert not any(button.label == "Generate full evidence report" for button in app.button)
 
-    navigate(app, "Model insights")
+    navigate(app, "Fraud overview")
     assert not app.exception
-    assert any("Held-out performance" in markdown.value for markdown in app.markdown)
-    assert any("Cost-of-fraud policy explorer" in markdown.value for markdown in app.markdown)
+    assert any("Held-out model performance" in markdown.value for markdown in app.markdown)
+    assert any("Threshold sensitivity explorer" in markdown.value for markdown in app.markdown)
     assert any("What drives the model's score" in markdown.value for markdown in app.markdown)
+    assert any("Top alerts" in markdown.value for markdown in app.markdown)
 
-    navigate(app, "Ask about a payment")
+    navigate(app, "Fraud alerts")
+    assert not app.exception
+    assert any("How to use this queue" in markdown.value for markdown in app.markdown)
+    assert {"Needs analyst review", "High priority", "Review band"}.issubset(
+        {metric.label for metric in app.metric}
+    )
+    review_button = next(
+        button for button in app.button if button.label == "Review transaction →"
+    )
+    review_button.click().run()
+    assert app.session_state["fraudlens_view"] == "Transaction investigation"
+    assert app.session_state["investigation_payment_id"]
+
+    navigate(app, "Transaction investigation")
+    assert not app.exception
+    assert any(button.label == "Generate full evidence report" for button in app.button)
     assert len(app.chat_input) == 1
 
-    navigate(app, "Score a transaction")
+    navigate(app, "Case management")
     assert not app.exception
-    assert any("Enter raw payment fields" in markdown.value for markdown in app.markdown)
-    assert any(button.label == "Run fraud model" for button in app.button)
-    assert {field.label for field in app.text_input} >= {
-        "Transaction ID", "Timestamp (UTC)", "User ID", "Device ID", "Card ID",
-        "Billing country", "IP country", "Merchant category",
-    }
+    assert any("Case management" in markdown.value for markdown in app.markdown)
 
 
 def test_mock_enforcement_capture_is_session_only_and_makes_no_http_calls(monkeypatch):
@@ -228,7 +236,7 @@ def test_connected_dashboard_loads_and_filters_razorpay_transactions(monkeypatch
         "mode": "test",
     }
     app.run()
-    navigate(app, "Transactions")
+    navigate(app, "Transaction explorer")
 
     assert not app.exception
     assert any("Account transactions" in markdown.value for markdown in app.markdown)
@@ -285,7 +293,7 @@ def test_connected_dashboard_converts_zero_decimal_currency(monkeypatch):
     }
 
     app.run()
-    navigate(app, "Transactions")
+    navigate(app, "Transaction explorer")
 
     assert not app.exception
     assert app.dataframe[0].value.iloc[0]["amount"] == 12_500.0
@@ -458,7 +466,7 @@ def test_mock_report_is_generated_and_rendered_as_the_walkthrough_highlight(monk
     )
     app = AppTest.from_file("frontend/app.py", default_timeout=90).run()
     open_demo(app)
-    navigate(app, "Transactions")
+    navigate(app, "Transaction investigation")
 
     next(
         button for button in app.button if button.label == "Generate full evidence report"
@@ -481,14 +489,19 @@ def test_mock_demo_shortcuts_route_to_each_review_surface(monkeypatch):
     app = AppTest.from_file("frontend/app.py", default_timeout=90).run()
     open_demo(app)
 
-    next(button for button in app.button if button.label == "Open evidence report").click().run()
-    assert app.session_state["fraudlens_view"] == "Transactions"
+    next(button for button in app.button if button.label == "Investigate top alert").click().run()
+    assert app.session_state["fraudlens_view"] == "Transaction investigation"
     assert app.session_state["demo_report_payment_id"]
+    assert app.session_state["investigation_payment_id"]
 
     navigate(app, "Review queue")
-    next(button for button in app.button if button.label == "Open policy audit").click().run()
-    assert app.session_state["fraudlens_view"] == "Model insights"
+    next(button for button in app.button if button.label == "Open fraud overview").click().run()
+    assert app.session_state["fraudlens_view"] == "Fraud overview"
 
     navigate(app, "Review queue")
-    next(button for button in app.button if button.label == "Ask AI about a payment").click().run()
-    assert app.session_state["fraudlens_view"] == "Ask about a payment"
+    next(button for button in app.button if button.label == "Explore all transactions").click().run()
+    assert app.session_state["fraudlens_view"] == "Transaction explorer"
+
+    navigate(app, "Review queue")
+    next(button for button in app.button if button.label == "Open case management").click().run()
+    assert app.session_state["fraudlens_view"] == "Case management"

@@ -1,7 +1,7 @@
 """Real, held-out global feature importance for the dashboard's signal panel.
 
 Computes mean(|SHAP value|) per model feature on the same untouched test
-window reported in backend/reports/metrics/evaluation.json, then groups the 14 model
+window reported in backend/reports/metrics/evaluation.json, then groups the 21 model
 features into the six signal categories the dashboard names, so the panel
 shows a measured statistic instead of an illustrative guess.
 """
@@ -22,14 +22,16 @@ SIGNAL_GROUPS: dict[str, list[str]] = {
     "Transaction velocity": [
         "card_txn_count_1h", "card_txn_count_24h",
         "device_txn_count_1h", "device_txn_count_24h",
+        "card_velocity_1h_log", "device_velocity_1h_log",
     ],
-    "Geography mismatch": ["geo_mismatch"],
-    "New device": ["is_new_device"],
+    "Geography mismatch": ["geo_mismatch", "geo_new_device", "geo_amount_ratio"],
+    "New device": ["is_new_device", "new_device_amount_ratio"],
     "Amount deviation": [
         "amount", "amount_log", "user_amount_zscore", "user_amount_mean", "user_amount_std",
+        "amount_to_user_mean_ratio",
     ],
     "Time of day": ["hour_sin", "hour_cos"],
-    "Transaction recency": ["seconds_since_user_last_txn"],
+    "Transaction recency": ["seconds_since_user_last_txn", "rapid_repeat"],
 }
 
 

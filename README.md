@@ -4,6 +4,8 @@
 
 FraudLens is a human-in-the-loop payment risk review workspace built for the Razorpay Buildathon AI Risk Manager track. Most hackathon fraud detectors stop at a score; FraudLens explains every flagged synthetic decision in plain language and can generate a full reviewer-ready evidence report grounded in the exact signals behind that decision. The AI writes only the explanation—the score, reason codes, and evidence values remain deterministic and independently inspectable.
 
+> **Prototype limitation:** FraudLens is a hackathon prototype, not a live Razorpay fraud prevention system. Its model is trained and evaluated only on generated synthetic transactions and labels. The metrics below do not establish production accuracy, safety, calibration, or business impact.
+
 It combines:
 
 - An explainable fraud model trained and evaluated on synthetic payment data.
@@ -18,8 +20,9 @@ FraudLens does **not** automatically capture, block, or refund a real payment. A
 ```text
 Payment data
     │
-    ├── Synthetic demo data ──> risk score ──> reasons and evidence
-    │                                      └─> human reviews the result
+    ├── Synthetic UI fixtures ──> rule-based demo score ──> review walkthrough
+    │
+    ├── Complete model input ──> FastAPI ──> XGBoost score + SHAP reasons
     │
     └── Razorpay Test Mode ──> authorized payment ──> review queue
                                                    ├─> approve and capture
@@ -27,14 +30,14 @@ Payment data
                                                    └─> refund if already captured
 ```
 
-The two branches are intentionally separate. Synthetic data contains the device, geography, velocity, history, and fraud-label fields required by the model. Razorpay's normal Payments API does not provide all of those fields, so FraudLens does not invent a score for real Razorpay payments.
+These paths are intentionally separate. Synthetic model data contains the device, geography, velocity, history, and fraud-label fields required by the model. Razorpay's normal Payments API does not provide all of those fields, so FraudLens does not invent a score for real Razorpay payments.
 
 ## What is real and what is simulated?
 
 | Area | Data | What happens |
 |---|---|---|
-| Mock dashboard | Generated payments | Demonstrates filtering, risk scores, evidence, reviewer actions, and audit entries. No Razorpay request is made. |
-| Fraud model | Reproducible synthetic dataset | Trains and evaluates a real XGBoost model using chronological, leakage-safe features. |
+| Mock dashboard | Generated UI fixtures | Demonstrates filtering, deterministic rule-based demo scores, evidence, reviewer actions, and audit entries. These scores are not XGBoost predictions, and no Razorpay request is made. |
+| Fraud model | Reproducible synthetic dataset | Trains and evaluates an XGBoost prototype using chronological, point-in-time features. |
 | Optional Razorpay integration | Razorpay Test Mode only | Loads Test Mode payment records and supports explicit human-approved capture/refund actions. |
 | AI explanation | Deterministic evidence plus optional Azure OpenAI text | AI summarizes existing evidence. It cannot change the score or initiate a payment action. |
 
@@ -42,30 +45,33 @@ The two branches are intentionally separate. Synthetic data contains the device,
 
 ## Dashboard tour
 
-The interface opens in demo mode and follows six focused views instead of one long page. The Review queue starts with a highlighted **Demo every case in one session** tour so a judge can see the entire product path without guessing where to click.
+The interface opens in demo mode and follows an analyst-shaped navigation rail: a review queue, then five focused fraud-review pages, then the real Razorpay account view. The Review queue starts with a highlighted **Demo every case in one session** tour so a judge can see the entire product path without guessing where to click.
 
 ### Complete demo path: all cases
 
 The deterministic mock dataset includes every labelled risk outcome: low-risk/allowed, review-band,
 high-risk/report, false-positive, and false-negative rows. Use the tour shortcuts in this order:
 
-1. **Inspect risk cases** to compare the five outcomes and their example payment IDs.
-2. **Open evidence report**, then click **Generate full evidence report**. This is the key moment:
-   an AI-written explanation is immediately followed by deterministic evidence values, so the demo
-   shows more than a score.
-3. **Open policy audit** for held-out metrics, the cost-of-fraud trade-off, global signal importance,
-   and the labelled decision audit.
-4. **Ask AI about a payment** to ask a grounded question about the visible row.
-5. **Score a transaction** to run the trained XGBoost model on a manually entered, signal-complete row
-   and ask AI about that saved score.
-6. Return to Review queue and exercise all three session-only enforcement outcomes: approve and capture,
+1. **Open fraud overview** for portfolio KPIs, a risk trend, the top alerts, held-out model metrics,
+   the cost-of-fraud trade-off, and global signal importance.
+2. **Investigate top alert**. This is the key moment: on Transaction investigation, click
+   **Generate full evidence report** — an AI-written explanation is immediately followed by
+   deterministic evidence values, so the demo shows more than a score. Then mark the case
+   **Confirm fraud** (or another status) and add an analyst note.
+3. **Explore all transactions** to filter the full synthetic set by date, amount, status, geography,
+   and device.
+4. **Open case management** to see every case an analyst has marked, filterable by status, each
+   linking back into Transaction investigation.
+5. Return to Review queue and exercise all three session-only enforcement outcomes: approve and capture,
    withhold capture after confirming fraud, and refund a payment captured before review.
-7. Use the real-account path only to show payment-history review. Real Razorpay rows deliberately have
+6. Use the real-account path only to show payment-history review. Real Razorpay rows deliberately have
    no model score or synthetic error label until the required enrichment signals are integrated.
 
 ### Demo mode
 
 The workspace opens directly in a clearly labelled synthetic demo session. No Razorpay credentials are required for the walkthrough.
+
+The 80 payments in this default walkthrough come from `frontend/app.py::mock_payments`. Their display scores use a fixed rule-based formula so every UI state remains deterministic. They are separate from both `backend/data/transactions.csv` and the trained XGBoost model.
 
 ### 1. Review queue
 
@@ -79,34 +85,35 @@ Practice the payment decision using two scenarios:
 
 Every mock action immediately adds a session audit entry containing the reviewer, timestamp, payment ID, action, and resulting status.
 
-### 2. Score a transaction
+### 2. Fraud overview
 
-Enter one raw transaction manually and click **Run fraud model**. The frontend sends the record to the FastAPI `/score/batch` endpoint, where the trained XGBoost artifact computes a risk score and SHAP-backed reasons. The scored context is retained by the running backend so **Ask about this scored transaction** can give an Azure OpenAI explanation grounded in the same score and evidence.
+Portfolio-level KPIs (total transactions, labelled fraud vs. legitimate, flagged-high-risk count), a rolling risk-score trend, and the top five open alerts with one-click **Investigate →** buttons into Transaction investigation. Below that: measured synthetic held-out precision, recall, F1, false-positive rate, PR-AUC, an explicitly descriptive threshold-sensitivity explorer, global SHAP signal importance, and the synthetic decision audit. If generated artifacts are unavailable, the dashboard says so instead of displaying fallback results.
 
-Required inputs are transaction ID, UTC timestamp, user ID, device ID, card ID, amount, billing country, IP country, and merchant category. Submit transactions in chronological order: each timestamp must be later than data already scored by that backend process.
+### 3. Fraud alerts
 
-### 3. Transactions
+Every synthetic transaction at or above the review threshold, grouped into high-priority and review bands. Each review card explains the score, payment context, triggering signals, recommended next step, and provides a **Review transaction →** shortcut.
+
+### 4. Transaction explorer
 
 Browse generated or connected-account payments. You can:
 
 - Search by payment ID, order ID, email, or contact.
-- Filter by payment status, method, currency, and risk status.
+- Filter by payment status, method, currency, risk status, geography match/mismatch, and device known/new.
 - Show only international payments.
 - Change the UTC date range.
 - Download the filtered table as CSV.
-- Generate a reviewer-ready evidence report for a high-risk synthetic transaction.
 
 Captured totals remain separated by currency; INR and USD are never added together as though they were interchangeable.
 
-### 4. Model insights
+### 5. Transaction investigation
 
-Inspect held-out model results, cost-policy assumptions, global SHAP feature importance, and the synthetic decision audit. Changing the false-positive and false-negative cost sliders recalculates the cheapest operating threshold from saved held-out confusion counts.
+Pick any transaction and see its full fraud-signal breakdown, its risk score, the AI evidence-report generator (available once a transaction reaches the high-priority threshold), case-status controls (mark under investigation, confirmed fraud, or false positive, with analyst notes), and a grounded chat that answers questions using only that transaction's own fields.
 
-### 5. Ask about a payment
+### 6. Case management
 
-Select a visible transaction and ask questions about its fields. The assistant uses only that transaction's supplied context and says when information is unavailable.
+Every transaction an analyst has marked, filterable by status, with the current status, risk score, who last updated it, and a shortcut back into Transaction investigation. Case status and notes are stored durably in Supabase (`fraud_cases` / `fraud_case_notes`), separate from the real Test Mode enforcement tables — marking a synthetic case never touches a real payment.
 
-### 6. Razorpay account
+### 7. Razorpay account
 
 The optional account view explains the real-data boundary and, when the Partner OAuth values are
 configured, starts a Test Mode OAuth connection. A connected account exposes payment history for
@@ -172,7 +179,7 @@ python -m pytest -q
 Expected result for the current repository:
 
 ```text
-79 passed
+103 passed
 ```
 
 Run only the dashboard tests:
@@ -197,32 +204,33 @@ The dataset contains 50,000 generated transactions. The newest 30%, or 15,000 tr
 | Metric | Result |
 |---|---:|
 | Model | Tuned, uncalibrated XGBoost |
-| Decision threshold | 0.26 |
-| Precision | 13.35% |
-| Recall | 76.61% |
-| F1 | 22.74% |
-| PR-AUC | 0.2982 |
-| ROC-AUC | 0.8549 |
-| Brier score | 0.0462 |
+| Decision threshold | 0.23, selected on validation data |
+| Precision | 17.20% |
+| Recall | 74.92% |
+| F1 | 27.97% |
+| False-positive rate | 7.24% |
+| PR-AUC | 0.3203 |
+| ROC-AUC | 0.8594 |
+| Brier score | 0.0368 |
 
 At this threshold:
 
 | Outcome | Transactions |
 |---|---:|
-| True positives | 226 |
-| False positives | 1,467 |
-| True negatives | 13,238 |
-| False negatives | 69 |
+| True positives | 221 |
+| False positives | 1,064 |
+| True negatives | 13,641 |
+| False negatives | 74 |
 
-### Why is precision only 13.35%?
+### Why is precision only 17.20%?
 
-The example policy assigns a cost of `$5` to reviewing a legitimate payment and `$500` to missing fraud. Under that 100:1 assumption, the cheapest threshold favors recall: it catches 76.61% of labelled fraud but produces many false alarms.
+The example policy assigns a cost of `$5` to reviewing a legitimate payment and `$500` to missing synthetic fraud. Under that illustrative 100:1 assumption, the validation-selected threshold favors recall: it catches 74.92% of labelled fraud in the held-out window but produces many false alarms.
 
-Put plainly, approximately 87 of every 100 payments flagged at this threshold are false positives. FraudLens shows this openly because the model is suitable for **human review**, not automatic payment blocking.
+Put plainly, approximately 83 of every 100 synthetic payments flagged at this threshold are false positives. This prototype is suitable for demonstrating **human review**, not automatic payment blocking.
 
-The cost assumptions are illustrative, not universal business values. The **Model insights** view lets a reviewer change them and see how the threshold, precision, recall, and total cost respond.
+The cost assumptions are illustrative, not Razorpay business values. The **Fraud overview** page lets a reviewer change them and inspect held-out threshold sensitivity. That test-set what-if view is descriptive; it does not change the saved validation-selected threshold.
 
-At the saved `$5` / `$500` policy, the measured total held-out cost is **$41,835**.
+At the saved `$5` / `$500` assumption, the measured synthetic held-out error cost is **$42,320**. This is a unit-cost calculation (`FP × $5 + FN × $500`), not observed financial loss or savings.
 
 ## How the model works
 
@@ -236,21 +244,34 @@ Model signals include:
 - Whether the device was previously seen.
 - Time since the customer's previous transaction.
 - Time-of-day behavior.
+- Interactions between unusual amount, new device, geography mismatch, velocity, and rapid repeats.
 
-Training uses a chronological 70/30 split rather than a random split. Model selection happens inside the training window, and the newest 30% is used only for final evaluation. The pipeline does not use SMOTE or duplicate minority rows.
+Training uses a chronological 70/30 split rather than a random split. Inside the earlier 70%, expanding temporal folds select XGBoost hyperparameters and a final validation window selects the operating threshold. The threshold is then locked and applied once to the newest 30% for final evaluation. Logistic regression, random forest, and calibrated XGBoost results on that test window are descriptive benchmarks only; they do not select the saved model. The pipeline does not use SMOTE or duplicate minority rows.
 
-To regenerate the dataset, train the candidates, evaluate the winner, and rebuild artifacts:
+The generated dataset and model search are reproducible with seed `20260903`. Training regenerates `backend/data/transactions.csv`, so that CSV is seeded development input—not captured Razorpay traffic. The generator deliberately encodes broad fraud correlations and label noise; good performance on those patterns may not transfer to real fraud, changing customer behavior, unseen merchants, or adversarial activity.
+
+To regenerate the dataset, tune the XGBoost candidate, lock its validation threshold, evaluate it, and rebuild artifacts:
 
 ```bash
 python -m backend.src.train
 python -m backend.src.global_importance
 ```
 
-Training evaluates 180 XGBoost parameter combinations inside the temporal training window and compares the selected candidate with calibrated XGBoost, random forest, and logistic regression.
+Training evaluates 145 XGBoost candidates across two expanding temporal validation windows. It tunes class weighting, depth, tree count, learning rate, child weight, row/feature sampling, split penalty, L1/L2 regularization, and maximum weight updates, then compares the selected candidate with calibrated XGBoost, random forest, and logistic regression.
+
+The current seeded run saved these XGBoost parameters: `max_depth=4`, `n_estimators=300`, `learning_rate=0.04`, `min_child_weight=8`, `subsample=0.85`, `colsample_bytree=0.70`, `gamma=0.3`, `reg_alpha=0`, `reg_lambda=10`, `max_delta_step=1`, and `scale_pos_weight=22.7405`. This class weight addresses label imbalance during fitting; it is not a hand-authored feature-priority table. Feature influence is learned by the trees, and the dashboard reports measured global SHAP group importance separately.
+
+### Where predictions appear
+
+- `backend/src/train.py` writes the fitted XGBoost artifact and its validation-selected threshold to `backend/models/fraud_detector.joblib`.
+- `backend/src/score.py` loads that artifact, builds stateful point-in-time features, predicts probabilities, compares each score with the saved threshold, and attaches SHAP-backed reasons to flagged rows.
+- FastAPI exposes that scorer through `POST /score` and `POST /score/batch` for inputs containing all required user, card, device, amount, time, and geography fields.
+- The dashboard's **Held-out model performance** panel reads the generated evaluation and SHAP artifacts. Its default alert rows are the separate rule-based UI fixtures described above; they do not pass through `/score`.
+- Connected Razorpay payment rows are not sent to XGBoost because the Payments API records do not contain all required model inputs. They display no fabricated model score.
 
 ## Evidence and AI explanations
 
-SHAP identifies the strongest positive contributors to a synthetic transaction's model score. Python converts the exact values into deterministic evidence such as elevated velocity, geography mismatch, unusual amount, or a first-seen device.
+For every scored transaction, the response states whether its score met the saved review threshold. For flagged synthetic transactions, SHAP also identifies the strongest positive model contributors, and Python converts the exact values into deterministic evidence such as elevated velocity, geography mismatch, unusual amount, or a first-seen device. SHAP is an attribution of model behavior, not a causal explanation or proof of fraud.
 
 Azure OpenAI is optional. When configured, it writes a short explanation connecting those facts. It cannot supply evidence values, change the model result, or trigger capture/refund. If AI configuration is missing or unavailable, the score and deterministic evidence continue to work.
 
@@ -272,10 +293,19 @@ authorization revocations, and the append-only enforcement audit in the
 Supabase project. Synthetic transactions and model artifacts remain local
 because they are part of the reproducible demo dataset.
 
+Case management (analyst status and notes on synthetic demo transactions) uses
+the same Supabase project through two additional, unrelated tables —
+`fraud_cases` and `fraud_case_notes` — created by
+`supabase/migrations/20260904171009_fraud_case_management.sql`. There is no
+sqlite fallback for case management: `SUPABASE_URL`/`SUPABASE_SECRET_KEY` must
+be set for Case management and the case-status controls on Transaction
+investigation to work, independent of `FRAUDLENS_STORAGE`.
+
 ### Setup
 
-1. Open the Supabase SQL Editor and run
-   `supabase/migrations/20260904145002_supabase_review_storage.sql`.
+1. Open the Supabase SQL Editor and run both migrations:
+   `supabase/migrations/20260904145002_supabase_review_storage.sql` and
+   `supabase/migrations/20260904171009_fraud_case_management.sql`.
 2. Add the server-only values to `.env`:
 
    ```dotenv

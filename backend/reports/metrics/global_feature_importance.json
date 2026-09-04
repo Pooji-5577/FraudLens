@@ -3,11 +3,11 @@
   "held_out_rows": 15000,
   "method": "mean(|SHAP value|) per model feature over the held-out test set, grouped into dashboard signal names and normalized to sum to 100%",
   "signal_importance_percent": {
-    "Transaction velocity": 17.4,
-    "Geography mismatch": 20.9,
-    "New device": 3.0,
-    "Amount deviation": 42.4,
-    "Time of day": 12.1,
-    "Transaction recency": 4.2
+    "Transaction velocity": 17.9,
+    "Geography mismatch": 20.6,
+    "New device": 3.2,
+    "Amount deviation": 42.5,
+    "Time of day": 11.5,
+    "Transaction recency": 4.3
   }
 }
