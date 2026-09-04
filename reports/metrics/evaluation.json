@@ -1,0 +1,171 @@
+{
+  "evaluation_split": "most recent 30% by timestamp",
+  "cost_fp": 5.0,
+  "cost_fn": 500.0,
+  "evaluation_period": {
+    "started": "2026-03-05 01:22:36+00:00",
+    "ended": "2026-03-31 23:52:30+00:00",
+    "currency": "USD"
+  },
+  "chosen": {
+    "threshold": 0.25999999999999995,
+    "precision": 0.13349084465445954,
+    "recall": 0.7661016949152543,
+    "f1": 0.22736418511066397,
+    "tp": 226.0,
+    "fp": 1467.0,
+    "tn": 13238.0,
+    "fn": 69.0,
+    "total_cost": 41835.0
+  },
+  "calibration": {
+    "brier_score": 0.04616830464296757,
+    "bins": [
+      {
+        "mean_predicted_risk": 0.026926348431656758,
+        "observed_fraud_rate": 0.006
+      },
+      {
+        "mean_predicted_risk": 0.04288396574308475,
+        "observed_fraud_rate": 0.0026666666666666666
+      },
+      {
+        "mean_predicted_risk": 0.05389191879580418,
+        "observed_fraud_rate": 0.008
+      },
+      {
+        "mean_predicted_risk": 0.06432376518348852,
+        "observed_fraud_rate": 0.0033333333333333335
+      },
+      {
+        "mean_predicted_risk": 0.07546849359075228,
+        "observed_fraud_rate": 0.006666666666666667
+      },
+      {
+        "mean_predicted_risk": 0.08911537170906862,
+        "observed_fraud_rate": 0.004666666666666667
+      },
+      {
+        "mean_predicted_risk": 0.10638776705165705,
+        "observed_fraud_rate": 0.006666666666666667
+      },
+      {
+        "mean_predicted_risk": 0.13442872375249862,
+        "observed_fraud_rate": 0.0026666666666666666
+      },
+      {
+        "mean_predicted_risk": 0.20702043918768565,
+        "observed_fraud_rate": 0.007333333333333333
+      },
+      {
+        "mean_predicted_risk": 0.6090610456069311,
+        "observed_fraud_rate": 0.14866666666666667
+      }
+    ]
+  },
+  "ranking": {
+    "average_precision": 0.29822179459779924,
+    "roc_auc": 0.8548847100317545
+  },
+  "selected_thresholds": [
+    {
+      "threshold": 0.005,
+      "precision": 0.019667977865191012,
+      "recall": 1.0,
+      "f1": 0.03857721982476788,
+      "tp": 295,
+      "fp": 14704,
+      "tn": 1,
+      "fn": 0,
+      "total_cost": 73520.0
+    },
+    {
+      "threshold": 0.01,
+      "precision": 0.019691609371871036,
+      "recall": 1.0,
+      "f1": 0.03862267609321812,
+      "tp": 295,
+      "fp": 14686,
+      "tn": 19,
+      "fn": 0,
+      "total_cost": 73430.0
+    },
+    {
+      "threshold": 0.025,
+      "precision": 0.020118915929203538,
+      "recall": 0.9864406779661017,
+      "f1": 0.03943356595975337,
+      "tp": 291,
+      "fp": 14173,
+      "tn": 532,
+      "fn": 4,
+      "total_cost": 72865.0
+    },
+    {
+      "threshold": 0.05,
+      "precision": 0.02366813708856464,
+      "recall": 0.9457627118644067,
+      "f1": 0.04618058429198047,
+      "tp": 279,
+      "fp": 11509,
+      "tn": 3196,
+      "fn": 16,
+      "total_cost": 65545.0
+    },
+    {
+      "threshold": 0.1,
+      "precision": 0.042824680999825206,
+      "recall": 0.8305084745762712,
+      "f1": 0.08144946808510638,
+      "tp": 245,
+      "fp": 5476,
+      "tn": 9229,
+      "fn": 50,
+      "total_cost": 52380.0
+    },
+    {
+      "threshold": 0.25,
+      "precision": 0.12746756909193457,
+      "recall": 0.7661016949152543,
+      "f1": 0.218568665377176,
+      "tp": 226,
+      "fp": 1547,
+      "tn": 13158,
+      "fn": 69,
+      "total_cost": 42235.0
+    }
+  ],
+  "model_comparison": [
+    {
+      "model": "tuned_xgboost_uncalibrated",
+      "average_precision": 0.29822179459779924,
+      "roc_auc": 0.8548847100317545
+    },
+    {
+      "model": "tuned_xgboost_calibrated",
+      "average_precision": 0.2890815158397913,
+      "roc_auc": 0.8553847129132833
+    },
+    {
+      "model": "random_forest",
+      "average_precision": 0.28725810377374883,
+      "roc_auc": 0.8466030809306186
+    },
+    {
+      "model": "logistic_regression",
+      "average_precision": 0.2682583374294644,
+      "roc_auc": 0.8497430252594816
+    }
+  ],
+  "production_model": "tuned_xgboost_uncalibrated",
+  "xgboost_search_best": {
+    "scale_pos_weight_multiplier": 0.5,
+    "scale_pos_weight": 28.850104821802937,
+    "max_depth": 3,
+    "n_estimators": 300,
+    "learning_rate": 0.05,
+    "validation_pr_auc": 0.34972137231807937,
+    "validation_roc_auc": 0.8799191920110593,
+    "candidates_evaluated": 180
+  }
+}

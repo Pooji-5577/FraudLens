@@ -1,0 +1,11 @@
+{
+  "note": "Original lightly tuned XGBoost, evaluated before the fair temporal search",
+  "uncalibrated": {
+    "average_precision": 0.2869627618104517,
+    "roc_auc": 0.831248681700563
+  },
+  "calibrated": {
+    "average_precision": 0.26573355401763277,
+    "roc_auc": 0.8359636696845879
+  }
+}

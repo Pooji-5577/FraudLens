@@ -1,5 +1,7 @@
 # Fraud Spike Detector
 
+[![tests](https://github.com/Pooji-5577/FraudLens/actions/workflows/tests.yml/badge.svg)](https://github.com/Pooji-5577/FraudLens/actions/workflows/tests.yml)
+
 An explainable, cost-aware fraud detector and merchant review workspace, with real Razorpay transaction connectivity for account review. Fraud scoring currently runs on a synthetic dataset engineered to include the signals that real-time scoring would need; connecting the trained model to enriched real Razorpay transactions is the next integration step.
 
 Most fraud detectors stop at a score; FraudLens explains every flagged synthetic decision in plain language and can generate a full reviewer-ready evidence report grounded in the exact signals behind that decision. The AI writes only the explanation—the score, reason codes, and evidence values remain deterministic and independently inspectable.

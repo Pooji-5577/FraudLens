@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import requests
 from urllib.parse import quote
@@ -9,6 +11,32 @@ from urllib.parse import quote
 
 class ScoringAPIError(RuntimeError):
     """A safe, user-displayable scoring service failure."""
+
+
+def load_threshold_curve(path: Path | str) -> pd.DataFrame:
+    """Load the held-out (never-trained-on) per-threshold confusion counts."""
+    curve = pd.read_csv(path)
+    required = {"threshold", "precision", "recall", "f1", "tp", "fp", "tn", "fn"}
+    missing = required - set(curve.columns)
+    if missing:
+        raise ValueError(f"threshold curve requires columns: {', '.join(sorted(missing))}")
+    return curve
+
+
+def cost_curve_for_ratio(curve: pd.DataFrame, cost_fp: float, cost_fn: float) -> pd.DataFrame:
+    """Recompute total held-out cost at every threshold for a chosen cost-per-error ratio."""
+    if cost_fp < 0 or cost_fn < 0:
+        raise ValueError("costs must be non-negative")
+    priced = curve.copy()
+    priced["total_cost"] = priced["fp"] * cost_fp + priced["fn"] * cost_fn
+    return priced
+
+
+def cheapest_threshold_row(priced_curve: pd.DataFrame) -> pd.Series:
+    """Return the held-out row with the lowest total cost for the current price ratio."""
+    if priced_curve.empty:
+        raise ValueError("threshold curve is empty")
+    return priced_curve.loc[priced_curve["total_cost"].idxmin()]
 
 
 def risk_evidence_summary(transactions: pd.DataFrame, threshold: float) -> dict:

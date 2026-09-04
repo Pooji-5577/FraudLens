@@ -7,13 +7,17 @@ import time
 
 import pandas as pd
 from pandas.testing import assert_frame_equal
+import pytest
 import requests
 
 from dashboard.processing import (
     ask_preview_transaction_question,
     ask_transaction_question,
+    cheapest_threshold_row,
     chronological_transactions,
+    cost_curve_for_ratio,
     filter_transactions_by_date,
+    load_threshold_curve,
     risk_audit_rows,
     risk_evidence_summary,
     score_uploaded_transactions,
@@ -243,3 +247,54 @@ def test_preview_transaction_question_sends_visible_row_without_scoring():
     assert client.payload["transaction"] == transaction
     assert client.payload["question"] == "What is the amount?"
     assert result["answer"] == "The amount is 100.00."
+
+
+def _threshold_curve():
+    return pd.DataFrame([
+        {"threshold": 0.1, "precision": 0.05, "recall": 0.95, "f1": 0.09, "tp": 190, "fp": 3610, "tn": 11095, "fn": 10},
+        {"threshold": 0.5, "precision": 0.20, "recall": 0.60, "f1": 0.30, "tp": 120, "fp": 480, "tn": 14225, "fn": 80},
+        {"threshold": 0.9, "precision": 0.60, "recall": 0.10, "f1": 0.17, "tp": 20, "fp": 13, "tn": 14692, "fn": 180},
+    ])
+
+
+def test_load_threshold_curve_reads_expected_columns(tmp_path):
+    csv_path = tmp_path / "threshold_curve.csv"
+    _threshold_curve().to_csv(csv_path, index=False)
+
+    curve = load_threshold_curve(csv_path)
+
+    assert list(curve["threshold"]) == [0.1, 0.5, 0.9]
+    assert curve["fp"].sum() == 3610 + 480 + 13
+
+
+def test_load_threshold_curve_rejects_missing_columns(tmp_path):
+    csv_path = tmp_path / "bad_curve.csv"
+    pd.DataFrame([{"threshold": 0.5, "precision": 0.2}]).to_csv(csv_path, index=False)
+
+    with pytest.raises(ValueError, match="threshold curve requires columns"):
+        load_threshold_curve(csv_path)
+
+
+def test_cost_curve_for_ratio_recomputes_total_cost_from_confusion_counts():
+    priced = cost_curve_for_ratio(_threshold_curve(), cost_fp=5.0, cost_fn=500.0)
+
+    assert list(priced["total_cost"]) == [
+        3610 * 5.0 + 10 * 500.0,
+        480 * 5.0 + 80 * 500.0,
+        13 * 5.0 + 180 * 500.0,
+    ]
+
+
+def test_cost_curve_for_ratio_rejects_negative_costs():
+    with pytest.raises(ValueError, match="non-negative"):
+        cost_curve_for_ratio(_threshold_curve(), cost_fp=-1.0, cost_fn=500.0)
+
+
+def test_cheapest_threshold_row_picks_lowest_total_cost_for_the_ratio():
+    priced = cost_curve_for_ratio(_threshold_curve(), cost_fp=5.0, cost_fn=500.0)
+    cheapest = cheapest_threshold_row(priced)
+    assert cheapest["threshold"] == 0.1
+
+    heavy_fp_priced = cost_curve_for_ratio(_threshold_curve(), cost_fp=500.0, cost_fn=500.0)
+    cheapest_heavy_fp = cheapest_threshold_row(heavy_fp_priced)
+    assert cheapest_heavy_fp["threshold"] == 0.9

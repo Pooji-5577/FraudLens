@@ -1,0 +1,17 @@
+[
+  {
+    "model": "random_forest",
+    "average_precision": 0.288450281985947,
+    "roc_auc": 0.8398732127317468
+  },
+  {
+    "model": "logistic_regression",
+    "average_precision": 0.2687290224513657,
+    "roc_auc": 0.8491646447939419
+  },
+  {
+    "model": "production_xgboost",
+    "average_precision": 0.26573355401763277,
+    "roc_auc": 0.8359636696845879
+  }
+]

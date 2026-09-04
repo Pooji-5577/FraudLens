@@ -17,7 +17,10 @@ from dotenv import load_dotenv
 from dashboard.processing import (
     ScoringAPIError,
     ask_preview_transaction_question,
+    cheapest_threshold_row,
+    cost_curve_for_ratio,
     generate_demo_transaction_report,
+    load_threshold_curve,
     risk_audit_rows,
     risk_evidence_summary,
 )
@@ -123,6 +126,13 @@ st.markdown(
     .report-kicker { color:var(--blue-hover); font-size:.76rem; font-weight:800; letter-spacing:.1em; }
     .report-spotlight h2 { color:var(--text-dark); margin:.25rem 0 .35rem; font-size:1.45rem; }
     .report-spotlight p { color:var(--text-muted); margin:0; line-height:1.5; }
+    .policy-spotlight { padding:1.25rem 1.35rem; border:2px solid #d9a441; border-radius:12px;
+      background:linear-gradient(135deg,#fff8ea,#ffffff); box-shadow:0 10px 28px rgba(217,164,65,.14); }
+    .policy-kicker { color:#a5731a; font-size:.76rem; font-weight:800; letter-spacing:.1em; }
+    .policy-spotlight h2 { color:var(--text-dark); margin:.25rem 0 .35rem; font-size:1.45rem; }
+    .policy-spotlight p { color:var(--text-muted); margin:0; line-height:1.5; }
+    .defense-banner { padding:.6rem 1rem; border:1px solid #2f8f5b; border-radius:8px;
+      background:#eafbf1; color:#1c6b41; font-size:.85rem; margin:.75rem 0; }
     @media (max-width: 800px) {
       .workflow { grid-template-columns:1fr; }
       .workflow-step { border-right:0; border-bottom:1px solid var(--border); }
@@ -144,6 +154,7 @@ RAZORPAY_MOCK_AUTH = os.getenv("RAZORPAY_MOCK_AUTH", "true").lower() == "true"
 SCORING_API_URL = os.getenv("SCORING_API_URL", "http://localhost:8000").rstrip("/")
 DEMO_BLOCKING_THRESHOLD = float(os.getenv("DEMO_BLOCKING_THRESHOLD", "0.65"))
 DEMO_REVIEW_THRESHOLD = float(os.getenv("DEMO_REVIEW_THRESHOLD", "0.40"))
+THRESHOLD_CURVE_PATH = PROJECT_ROOT / "reports" / "metrics" / "threshold_curve.csv"
 
 
 def oauth_is_configured() -> bool:
@@ -704,6 +715,54 @@ if is_risk_enriched:
             "Risk score": st.column_config.NumberColumn("Risk score", format="%.3f"),
             "Evidence": st.column_config.TextColumn("Evidence", width="large"),
         },
+    )
+
+    st.markdown(
+        """
+        <div class="policy-spotlight">
+          <div class="policy-kicker">HONEST METRICS, INCLUDING FALSE-POSITIVE COST</div>
+          <h2>Cost-of-fraud policy explorer</h2>
+          <p>These curves come from the trained model's held-out test set — 15,000 transactions with a timestamp strictly after every training row, never used to fit or select the model. Set your own cost per false positive and false negative to see how the optimal threshold, precision, and recall shift.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    try:
+        threshold_curve = load_threshold_curve(THRESHOLD_CURVE_PATH)
+    except (FileNotFoundError, ValueError) as exc:
+        st.info(f"Held-out threshold curve unavailable: {exc}")
+    else:
+        slider_left, slider_right = st.columns(2)
+        with slider_left:
+            explorer_cost_fp = st.slider(
+                "Cost per false positive — legitimate payment blocked ($)",
+                min_value=1, max_value=200, value=5, step=1,
+            )
+        with slider_right:
+            explorer_cost_fn = st.slider(
+                "Cost per false negative — fraud that slips through ($)",
+                min_value=10, max_value=2000, value=500, step=10,
+            )
+        priced_curve = cost_curve_for_ratio(threshold_curve, explorer_cost_fp, explorer_cost_fn)
+        cheapest = cheapest_threshold_row(priced_curve)
+
+        pm1, pm2, pm3, pm4 = st.columns(4)
+        pm1.metric("Cheapest threshold", f"{cheapest['threshold']:.2f}")
+        pm2.metric("Precision there", f"{cheapest['precision']:.1%}")
+        pm3.metric("Recall there", f"{cheapest['recall']:.1%}")
+        pm4.metric("Total held-out cost", f"${cheapest['total_cost']:,.0f}")
+
+        st.line_chart(priced_curve.set_index("threshold")["total_cost"])
+        st.caption(
+            "Total cost = (false positives × cost-per-FP) + (false negatives × cost-per-FN), "
+            "recomputed at every threshold from the same held-out confusion counts. Lower is better. "
+            "The deployed policy uses cost-per-FP=$5 / cost-per-FN=$500 (a 100:1 ratio), landing on threshold 0.26."
+        )
+    st.markdown(
+        '<div class="defense-banner">🛡️ Defense-only: this explains and prioritizes existing signals for human '
+        'review. It never suggests how to evade detection, and no synthetic decision here blocks, declines, '
+        'captures, or refunds a real Razorpay payment.</div>',
+        unsafe_allow_html=True,
     )
 st.download_button(
     "Download filtered transactions",

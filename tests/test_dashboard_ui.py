@@ -58,10 +58,13 @@ def test_mock_connection_opens_transaction_dashboard_without_credentials(monkeyp
         "Flagged as fraud", "Correctly caught", "Precision", "Recall",
         "False-positive cost (legitimate payments blocked)",
         "False-negative cost (fraud that slipped through)",
+        "Cheapest threshold", "Precision there", "Recall there", "Total held-out cost",
     } == {metric.label for metric in app.metric}
     assert any("Risk evaluation evidence" in markdown.value for markdown in app.markdown)
     assert any("Error breakdown" in markdown.value for markdown in app.markdown)
     assert any("Audit trail" in markdown.value for markdown in app.markdown)
+    assert any("Cost-of-fraud policy explorer" in markdown.value for markdown in app.markdown)
+    assert any("Defense-only" in markdown.value for markdown in app.markdown)
     report_buttons = [
         button for button in app.button if button.label == "✨ Generate full evidence report"
     ]
