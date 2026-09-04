@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from dashboard.processing import (
     ScoringAPIError,
     ask_preview_transaction_question,
+    generate_demo_transaction_report,
     risk_audit_rows,
     risk_evidence_summary,
 )
@@ -117,6 +118,11 @@ st.markdown(
     .importance-row:last-child { border-bottom:0; }
     .importance-track { height:10px; border-radius:3px; background:var(--panel-bg); overflow:hidden; }
     .importance-fill { height:100%; background:var(--blue); }
+    .report-spotlight { padding:1.25rem 1.35rem; border:2px solid var(--blue); border-radius:12px;
+      background:linear-gradient(135deg,#eef6ff,#ffffff); box-shadow:0 10px 28px rgba(51,149,255,.12); }
+    .report-kicker { color:var(--blue-hover); font-size:.76rem; font-weight:800; letter-spacing:.1em; }
+    .report-spotlight h2 { color:var(--text-dark); margin:.25rem 0 .35rem; font-size:1.45rem; }
+    .report-spotlight p { color:var(--text-muted); margin:0; line-height:1.5; }
     @media (max-width: 800px) {
       .workflow { grid-template-columns:1fr; }
       .workflow-step { border-right:0; border-bottom:1px solid var(--border); }
@@ -351,7 +357,7 @@ is_mock_session = bool(st.session_state["razorpay_connection"].get("mock"))
 hero_kicker = "SYNTHETIC RISK DEMO" if is_mock_session else "RAZORPAY PAYMENT HISTORY"
 hero_title = "Synthetic scoring walkthrough" if is_mock_session else "Razorpay payment history"
 hero_copy = (
-    "Explore generated payments with simulated risk signals, decisions, labels, and evaluation evidence."
+    "Explore generated payments, then turn a risk decision into a plain-language AI explanation and full evidence report."
     if is_mock_session
     else "Browse and filter payments from the connected Razorpay account. This view is for account review and does not score real payments."
 )
@@ -373,7 +379,7 @@ if not is_mock_session:
     )
 
 workflow = (
-    ("Load synthetic transactions", "Inspect simulated risk signals", "Review demo decisions")
+    ("Load synthetic transactions", "Inspect simulated risk signals", "Generate AI evidence report")
     if is_mock_session
     else ("Load payment history", "Filter account activity", "Inspect payment details")
 )
@@ -560,6 +566,78 @@ st.dataframe(
 )
 
 if is_risk_enriched:
+    report_candidates = filtered[filtered["risk_score"].ge(DEMO_BLOCKING_THRESHOLD)]
+    if not report_candidates.empty:
+        st.markdown(
+            """
+            <div class="report-spotlight">
+              <div class="report-kicker">THE DIFFERENCE</div>
+              <h2>Go beyond the risk score</h2>
+              <p>The score starts the review; the evidence report explains the decision in plain language and preserves every supporting signal for a human reviewer.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        report_left, report_right = st.columns([2, 1], vertical_alignment="bottom")
+        with report_left:
+            report_payment_id = st.selectbox(
+                "High-risk demo transaction",
+                report_candidates["payment_id"].astype(str).tolist(),
+                key="demo_report_payment_id",
+            )
+        with report_right:
+            generate_report_clicked = st.button(
+                "✨ Generate full evidence report",
+                type="primary",
+                use_container_width=True,
+            )
+        if generate_report_clicked:
+            selected_report_row = report_candidates.loc[
+                report_candidates["payment_id"].astype(str).eq(report_payment_id)
+            ].iloc[0]
+            report_transaction = {
+                "payment_id": str(selected_report_row["payment_id"]),
+                "velocity": int(selected_report_row["velocity"]),
+                "ip_billing_mismatch": bool(selected_report_row["ip_billing_mismatch"]),
+                "new_device": bool(selected_report_row["new_device"]),
+                "amount_deviation": float(selected_report_row["amount_deviation"]),
+                "risk_score": float(selected_report_row["risk_score"]),
+            }
+            try:
+                with st.spinner("Turning verified signals into a reviewer-ready explanation…"):
+                    generated_report = generate_demo_transaction_report(
+                        report_transaction,
+                        SCORING_API_URL,
+                        threshold=DEMO_BLOCKING_THRESHOLD,
+                    )
+                st.session_state["demo_evidence_report"] = {
+                    "payment_id": report_payment_id,
+                    "report": generated_report,
+                }
+            except ScoringAPIError as exc:
+                st.error(str(exc))
+
+        saved_report = st.session_state.get("demo_evidence_report")
+        if saved_report and saved_report["payment_id"] == report_payment_id:
+            report = saved_report["report"]
+            st.markdown("#### ✨ AI explanation")
+            if report.get("summary"):
+                st.info(report["summary"], icon="✨")
+            elif report.get("error"):
+                st.warning(report["error"])
+            st.markdown("#### Verified evidence")
+            st.dataframe(
+                pd.DataFrame(
+                    {
+                        "Signal": [item["signal"].replace("_", " ").title() for item in report["evidence"]],
+                        "Observed evidence": [item["detail"] for item in report["evidence"]],
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption(report["confidence_note"])
+
     st.markdown(
         """
         <div class="importance-panel">

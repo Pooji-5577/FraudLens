@@ -2,6 +2,8 @@
 
 An explainable, cost-aware fraud detector and merchant review workspace, with real Razorpay transaction connectivity for account review. Fraud scoring currently runs on a synthetic dataset engineered to include the signals that real-time scoring would need; connecting the trained model to enriched real Razorpay transactions is the next integration step.
 
+Most fraud detectors stop at a score; FraudLens explains every flagged synthetic decision in plain language and can generate a full reviewer-ready evidence report grounded in the exact signals behind that decision. The AI writes only the explanation—the score, reason codes, and evidence values remain deterministic and independently inspectable.
+
 The two current paths are deliberately separate:
 
 - **Razorpay payment history:** read-only OAuth access loads real payment records for filtering, inspection, export, and transaction-grounded chat. These records are not scored by the fraud model.
@@ -62,9 +64,11 @@ clearly labelled mock session without credentials or Razorpay account data. Set 
 
 The synthetic API scorer keeps prior transactions in memory so velocity and history features are point-in-time correct within a running process. Single requests must arrive in increasing timestamp order. `POST /score/batch` sorts each submitted batch chronologically before applying state, and equal-timestamp transactions cannot observe one another. Separate batches must still move forward in time. A fresh process starts with cold history, while a production service would hydrate state from a feature store.
 
-## Optional humanized evidence reports
+## From score to evidence report
 
 For a blocked transaction, the API can organize the exact scored feature values into a reviewer-facing evidence report. Python builds the evidence list directly from card/device velocity, country comparison, amount baseline, device history, and transaction recency. Azure OpenAI only writes the connecting 2–3 sentence summary; it cannot supply or modify evidence values. The prompt forbids speculation about customer identity, intent, or whether fraud occurred.
+
+In the synthetic dashboard walkthrough, choose a high-risk demo transaction and click **✨ Generate full evidence report**. This is the walkthrough's key moment: the UI moves from a bare score to an AI-written explanation, followed by the deterministic evidence that supports it. The same capability is available for transactions scored by the trained model through the report API; the mock dashboard labels its simplified demonstration signals separately.
 
 Use `.env.example` as a template and export these variables in the API process (or load your `.env` through your deployment platform):
 
@@ -77,7 +81,7 @@ export AZURE_OPENAI_API_VERSION="v1"
 
 `AZURE_OPENAI_API_VERSION` defaults to the current stable `v1` Azure OpenAI API. No real credentials belong in the repository. Without complete Azure configuration, ordinary scoring is unchanged and the dashboard explains that narrative reports are unavailable. Provider timeouts are retried once; authentication, rate-limit, timeout, and other generation failures return the original score/flag/reasons normally and retain deterministic evidence with a safe failure status.
 
-Request a report during synthetic single-transaction scoring with `POST /score?include_report=true`. Scores below the saved threshold are marked for monitoring; scores at or above it return `blocked: true` and `recommended_action: auto-block`. These values describe the synthetic policy simulation only and do not enforce any action in Razorpay.
+Request a report during synthetic single-transaction scoring with `POST /score?include_report=true`, request a retained scored transaction with `POST /report/{transaction_id}`, or generate the clearly labelled mock walkthrough report with `POST /demo-report`. Scores below the saved threshold are marked for monitoring; scores at or above it return `blocked: true` and `recommended_action: auto-block`. These values describe the synthetic policy simulation only and do not enforce any action in Razorpay.
 
 Example report shape:
 

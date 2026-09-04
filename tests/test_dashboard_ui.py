@@ -1,6 +1,7 @@
 import pytest
 from streamlit.testing.v1 import AppTest
 
+import dashboard.processing as processing
 import dashboard.razorpay_oauth as razorpay_oauth
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -37,6 +38,11 @@ def test_mock_connection_opens_transaction_dashboard_without_credentials(monkeyp
     assert any("generated examples" in warning.value for warning in app.warning)
     assert any("SYNTHETIC RISK DEMO" in markdown.value for markdown in app.markdown)
     assert any("Synthetic scoring walkthrough" in markdown.value for markdown in app.markdown)
+    assert any(
+        "The score starts the review; the evidence report explains the decision"
+        in markdown.value
+        for markdown in app.markdown
+    )
     assert len(app.dataframe) == 3
     assert len(app.dataframe[0].value) == 80
     assert list(app.dataframe[0].value.columns) == [
@@ -56,6 +62,10 @@ def test_mock_connection_opens_transaction_dashboard_without_credentials(monkeyp
     assert any("Risk evaluation evidence" in markdown.value for markdown in app.markdown)
     assert any("Error breakdown" in markdown.value for markdown in app.markdown)
     assert any("Audit trail" in markdown.value for markdown in app.markdown)
+    report_buttons = [
+        button for button in app.button if button.label == "✨ Generate full evidence report"
+    ]
+    assert len(report_buttons) == 1
 
 
 def test_connected_dashboard_loads_and_filters_razorpay_transactions(monkeypatch):
@@ -120,6 +130,7 @@ def test_connected_dashboard_loads_and_filters_razorpay_transactions(monkeypatch
     assert "risk_score" not in app.dataframe[0].value.columns
     assert len(app.chat_input) == 1
     assert [widget.label for widget in app.selectbox] == ["Transaction for AI chat"]
+    assert not any(button.label == "✨ Generate full evidence report" for button in app.button)
     assert not any("Upload your CSV" in markdown.value for markdown in app.markdown)
     assert not any("Guided walkthrough" in markdown.value for markdown in app.markdown)
 
@@ -194,3 +205,41 @@ def test_disconnect_revokes_razorpay_access_before_clearing_session(monkeypatch)
         {"client_id": "client_123", "client_secret": "server-secret"},
     )]
     assert "razorpay_connection" not in app.session_state
+
+
+def test_mock_report_is_generated_and_rendered_as_the_walkthrough_highlight(monkeypatch):
+    monkeypatch.setenv("RAZORPAY_AUTH_DISABLED", "false")
+    monkeypatch.setenv("RAZORPAY_MOCK_AUTH", "true")
+    monkeypatch.delenv("RAZORPAY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("RAZORPAY_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("RAZORPAY_REDIRECT_URI", raising=False)
+    monkeypatch.setattr(
+        processing,
+        "generate_demo_transaction_report",
+        lambda transaction, _url, **_kwargs: {
+            "status": "generated",
+            "summary": "Recent activity was elevated and this was a new device.",
+            "evidence": [
+                {"signal": "transaction_velocity", "detail": "17 recent transactions."},
+                {"signal": "device_history", "detail": "Device was not previously seen."},
+            ],
+            "confidence_note": "Synthetic demonstration evidence for human review.",
+            "recommended_action": "demo-block",
+        },
+    )
+    app = AppTest.from_file("dashboard/app.py", default_timeout=90).run()
+    next(
+        button for button in app.button if button.label == "Connect mock Razorpay account"
+    ).click().run()
+
+    next(
+        button for button in app.button if button.label == "✨ Generate full evidence report"
+    ).click().run()
+
+    assert not app.exception
+    assert any("AI explanation" in markdown.value for markdown in app.markdown)
+    assert any(
+        "Recent activity was elevated and this was a new device." in info.value
+        for info in app.info
+    )
+    assert any("Verified evidence" in markdown.value for markdown in app.markdown)

@@ -11,6 +11,7 @@ from src.score import FraudScorer
 from src.report import (
     answer_preview_transaction_question,
     answer_transaction_question,
+    generate_demo_report,
     generate_report,
 )
 
@@ -51,6 +52,11 @@ class TransactionChatRequest(BaseModel):
 
 class PreviewTransactionChatRequest(TransactionChatRequest):
     transaction: dict[str, Any]
+
+
+class DemoReportRequest(BaseModel):
+    transaction: dict[str, Any]
+    threshold: float = Field(default=.65, ge=0, le=1)
 
 
 @app.get("/health")
@@ -106,6 +112,20 @@ def report(transaction_id: str) -> dict:
         raise HTTPException(
             status_code=503,
             detail="Narrative reports are unavailable because Azure OpenAI is not configured.",
+        )
+    return generated
+
+
+@app.post("/demo-report", response_model=dict[str, Any])
+def demo_report(request: DemoReportRequest) -> dict:
+    try:
+        generated = generate_demo_report(request.transaction, request.threshold)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="The synthetic demo signals are incomplete.") from exc
+    if generated is None:
+        raise HTTPException(
+            status_code=503,
+            detail="AI evidence reports are unavailable or the selected demo payment is below threshold.",
         )
     return generated
 

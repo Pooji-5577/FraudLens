@@ -23,6 +23,11 @@ numbers, customer information, intent, identity, or wrongdoing. Do not speculate
 customer acted or whether the transaction is fraud. Explain only why the detector automatically
 blocked the payment for review. Return exactly 2 or 3 plain-language sentences and no heading or bullet list."""
 
+DEMO_REPORT_SYSTEM_PROMPT = """You explain a synthetic fraud-risk demonstration to a non-technical
+merchant reviewer. Use only the supplied evidence. Never add or infer transaction details, identity,
+intent, wrongdoing, or whether fraud occurred. Explain why the demonstration decision was triggered,
+and explicitly call it a synthetic demo. Return exactly 2 or 3 plain-language sentences with no heading."""
+
 CONFIDENCE_NOTE = (
     "This is a model-generated risk assessment for human review, not a determination of fraud."
 )
@@ -115,6 +120,36 @@ def evidence_from_features(transaction: dict) -> list[dict]:
     ]
 
 
+def demo_evidence_from_signals(transaction: dict) -> list[dict]:
+    """Build evidence from the exact signals visible in the synthetic UI demo."""
+    velocity = int(transaction["velocity"])
+    mismatch = bool(transaction["ip_billing_mismatch"])
+    is_new = bool(transaction["new_device"])
+    deviation = float(transaction["amount_deviation"])
+    return [
+        {
+            "signal": "transaction_velocity",
+            "detail": f"{velocity} recent transactions were present in the synthetic demo window.",
+            "values": {"recent_transactions": velocity},
+        },
+        {
+            "signal": "geography",
+            "detail": f"IP and billing geography {'did not match' if mismatch else 'matched'} in the demo.",
+            "values": {"ip_billing_mismatch": mismatch},
+        },
+        {
+            "signal": "device_history",
+            "detail": f"Device was {'not previously seen' if is_new else 'previously seen'} in the demo.",
+            "values": {"new_device": is_new},
+        },
+        {
+            "signal": "amount_deviation",
+            "detail": f"Amount differed from the synthetic customer baseline by {deviation:+.0f}%.",
+            "values": {"deviation_percent": deviation},
+        },
+    ]
+
+
 def recommended_action(score: float, threshold: float) -> str:
     if score >= threshold:
         return "auto-block"
@@ -127,6 +162,7 @@ def _azure_summary(
     score: float,
     threshold: float,
     reasons: list[str],
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> str:
     facts = "\n".join(f"- {item['detail']}" for item in evidence)
     shap_facts = "\n".join(f"- {reason}" for reason in reasons)
@@ -147,7 +183,7 @@ def _azure_summary(
     payload = {
         "model": config.deployment_name,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.1,
@@ -171,6 +207,23 @@ def _azure_summary(
             if attempt == 1:
                 raise
     raise RuntimeError("summary generation failed")
+
+
+def _azure_demo_summary(
+    config: AzureOpenAIConfig,
+    evidence: list[dict],
+    score: float,
+    threshold: float,
+    reasons: list[str],
+) -> str:
+    return _azure_summary(
+        config,
+        evidence,
+        score,
+        threshold,
+        reasons,
+        system_prompt=DEMO_REPORT_SYSTEM_PROMPT,
+    )
 
 
 def transaction_chat_context(
@@ -343,6 +396,41 @@ def generate_report(
         "evidence": evidence,
         "confidence_note": CONFIDENCE_NOTE,
         "recommended_action": action,
+    }
+    if error:
+        report["error"] = error
+    return report
+
+
+def generate_demo_report(
+    transaction: dict,
+    threshold: float,
+    summary_writer: Callable | None = None,
+) -> dict | None:
+    """Generate an AI summary plus deterministic evidence for a flagged mock payment."""
+    score = float(transaction["risk_score"])
+    if score < float(threshold):
+        return None
+    config = AzureOpenAIConfig.from_env()
+    if config is None:
+        return None
+    evidence = demo_evidence_from_signals(transaction)
+    reasons = [item["detail"] for item in evidence]
+    writer = summary_writer or _azure_demo_summary
+    try:
+        summary = writer(config, evidence, score, float(threshold), reasons)
+        status = "generated"
+        error = None
+    except Exception:
+        summary = None
+        status = "failed"
+        error = "The AI explanation could not be generated; verified demo evidence remains available."
+    report = {
+        "status": status,
+        "summary": summary,
+        "evidence": evidence,
+        "confidence_note": "Synthetic demonstration evidence for human review, not a fraud determination.",
+        "recommended_action": "demo-block",
     }
     if error:
         report["error"] = error

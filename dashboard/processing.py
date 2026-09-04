@@ -192,6 +192,41 @@ def generate_transaction_report(
     return report
 
 
+def generate_demo_transaction_report(
+    transaction: dict,
+    api_url: str,
+    threshold: float = .65,
+    timeout: float = 30.0,
+    http_client=requests,
+) -> dict:
+    """Generate a report from the exact signals in a synthetic dashboard row."""
+    try:
+        response = http_client.post(
+            f"{api_url.rstrip('/')}/demo-report",
+            json={"transaction": transaction, "threshold": threshold},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        report = response.json()
+    except requests.Timeout as exc:
+        raise ScoringAPIError("Evidence report generation timed out. Please try again.") from exc
+    except requests.ConnectionError as exc:
+        raise ScoringAPIError("The scoring service is offline or unreachable.") from exc
+    except requests.RequestException as exc:
+        detail = ""
+        if exc.response is not None:
+            try:
+                detail = exc.response.json().get("detail", "")
+            except ValueError:
+                pass
+        raise ScoringAPIError(detail or "The demo evidence report could not be generated.") from exc
+    except ValueError as exc:
+        raise ScoringAPIError("The scoring service returned an invalid report.") from exc
+    if not isinstance(report, dict) or "status" not in report or "evidence" not in report:
+        raise ScoringAPIError("The scoring service returned an invalid report.")
+    return report
+
+
 def ask_transaction_question(
     transaction_id: str,
     question: str,

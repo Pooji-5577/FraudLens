@@ -7,7 +7,9 @@ from src.report import (
     SYSTEM_PROMPT,
     answer_preview_transaction_question,
     answer_transaction_question,
+    demo_evidence_from_signals,
     evidence_from_features,
+    generate_demo_report,
     generate_report,
 )
 from src.score import FraudScorer
@@ -67,6 +69,34 @@ def test_report_evidence_values_equal_computed_features_exactly():
         "zscore": float(row["user_amount_zscore"]),
     }
     assert evidence["device_history"]["values"]["is_new_device"] is bool(row["is_new_device"])
+
+
+def test_demo_report_is_grounded_in_visible_synthetic_signals(monkeypatch):
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "mock-key")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com")
+    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT_NAME", "review-summary")
+    transaction = {
+        "payment_id": "pay_demo_1",
+        "velocity": 17,
+        "ip_billing_mismatch": True,
+        "new_device": True,
+        "amount_deviation": 72,
+        "risk_score": .91,
+    }
+    captured = {}
+
+    def writer(_config, evidence, score, threshold, reasons):
+        captured.update(evidence=evidence, score=score, threshold=threshold, reasons=reasons)
+        return "Recent activity was elevated and the payment used a new device."
+
+    report = generate_demo_report(transaction, threshold=.65, summary_writer=writer)
+
+    assert report["status"] == "generated"
+    assert report["summary"].startswith("Recent activity")
+    assert report["recommended_action"] == "demo-block"
+    assert report["evidence"] == demo_evidence_from_signals(transaction)
+    assert captured["score"] == .91
+    assert captured["threshold"] == .65
 
 
 def test_azure_failure_returns_verified_evidence_without_secret(monkeypatch):
