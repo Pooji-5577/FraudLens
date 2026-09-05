@@ -6,6 +6,7 @@ from pathlib import Path
 from threading import Lock
 
 import joblib
+import numpy as np
 import pandas as pd
 
 from backend.src.explain import explain_flagged
@@ -30,6 +31,20 @@ class FraudScorer:
     def score_batch(self, transactions: pd.DataFrame) -> pd.DataFrame:
         with self._lock:
             featured = engineer_features(transactions, self.state)
+            if "uploaded_velocity_per_hour" in featured.columns:
+                velocity = pd.to_numeric(
+                    featured["uploaded_velocity_per_hour"], errors="coerce"
+                ).fillna(0.0)
+                for column in ("card_txn_count_1h", "device_txn_count_1h"):
+                    featured[column] = featured[column].where(
+                        featured[column] >= velocity, velocity
+                    )
+                for column in ("card_txn_count_24h", "device_txn_count_24h"):
+                    featured[column] = featured[column].where(
+                        featured[column] >= velocity, velocity
+                    )
+                featured["card_velocity_1h_log"] = np.log1p(featured["card_txn_count_1h"])
+                featured["device_velocity_1h_log"] = np.log1p(featured["device_txn_count_1h"])
             probabilities = self.model.predict_proba(model_matrix(featured))[:, 1]
             reasons = explain_flagged(self.explanation_model, featured, probabilities, self.threshold)
             for index, probability in enumerate(probabilities):

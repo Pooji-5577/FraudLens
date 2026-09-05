@@ -54,6 +54,15 @@ def group_and_normalize(mean_abs_shap: pd.Series) -> dict[str, float]:
     }
 
 
+def compute_featured_importance(featured: pd.DataFrame, explanation_model) -> dict[str, float]:
+    """Return grouped mean absolute SHAP influence for a scored dataset."""
+    if featured.empty:
+        return {name: 0.0 for name in SIGNAL_GROUPS}
+    contributions = shap_contributions(explanation_model, model_matrix(featured))
+    mean_abs = pd.Series(np.abs(contributions).mean(axis=0), index=MODEL_FEATURES)
+    return group_and_normalize(mean_abs)
+
+
 def compute_global_importance(
     root: Path = Path(__file__).resolve().parents[1],
 ) -> dict:
@@ -67,9 +76,6 @@ def compute_global_importance(
     test = featured[featured["timestamp"] >= test_started]
     matrix = model_matrix(test)
 
-    contributions = shap_contributions(artifact["explanation_model"], matrix)
-    mean_abs = pd.Series(np.abs(contributions).mean(axis=0), index=MODEL_FEATURES)
-
     return {
         "held_out_test_start": str(test_started),
         "held_out_rows": int(len(test)),
@@ -77,7 +83,7 @@ def compute_global_importance(
             "mean(|SHAP value|) per model feature over the held-out test set, "
             "grouped into dashboard signal names and normalized to sum to 100%"
         ),
-        "signal_importance_percent": group_and_normalize(mean_abs),
+        "signal_importance_percent": compute_featured_importance(test, artifact["explanation_model"]),
     }
 
 

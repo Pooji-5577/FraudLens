@@ -22,9 +22,12 @@ from frontend.processing import (
     filter_transactions_by_date,
     load_global_importance,
     load_threshold_curve,
+    normalize_uploaded_transactions,
     risk_audit_rows,
     risk_evidence_summary,
+    score_and_save_uploaded_dataset,
     score_uploaded_transactions,
+    uploaded_scores_to_dashboard_transactions,
 )
 
 
@@ -44,6 +47,67 @@ def _transactions():
         }
         for i in range(5)
     ])
+
+
+def test_uploaded_csv_columns_are_detected_and_missing_model_fields_are_inferred():
+    raw = pd.DataFrame([
+        {
+            "Txn": "pay_demo_015",
+            "User ID": "CUST_0020",
+            "Amount": "INR 399.00",
+            "Method": "Upi",
+            "Velocity": "1/24hr",
+            "IP Address": "49.36.187.29",
+            "Billing Country": "IN",
+            "Device": "Samsung S24",
+            "Timestamp": "2026-08-01 16:56:38 UTC",
+        }
+    ])
+
+    result = normalize_uploaded_transactions(raw)
+
+    assert result["transactions"].iloc[0].to_dict() == {
+        "transaction_id": "pay_demo_015",
+        "timestamp": pd.Timestamp("2026-08-01 16:56:38+00:00"),
+        "user_id": "CUST_0020",
+        "device_id": "Samsung S24",
+        "card_id": "inferred-card-CUST_0020-Upi",
+        "amount": 399.0,
+        "billing_country": "IN",
+        "ip_country": "IN",
+        "merchant_category": "Upi",
+        "currency": "INR",
+        "uploaded_velocity_per_hour": 1 / 24,
+        "ip_address": "49.36.187.29",
+    }
+    assert result["mapped"] == {
+        "Txn": "transaction_id",
+        "User ID": "user_id",
+        "Amount": "amount",
+        "Method": "merchant_category",
+        "Billing Country": "billing_country",
+        "IP Address": "ip_country",
+        "Device": "device_id",
+        "Timestamp": "timestamp",
+        "Velocity": "uploaded_velocity_per_hour",
+    }
+    assert result["inferred"] == ["card_id"]
+    assert result["ignored"] == []
+
+
+def test_uploaded_csv_can_score_with_only_an_amount_column():
+    raw = pd.DataFrame({"Transaction Amount": ["1,299.50", "INR 49"]})
+
+    result = normalize_uploaded_transactions(raw)
+    transactions = result["transactions"]
+
+    assert transactions["amount"].tolist() == [1299.5, 49.0]
+    assert transactions["transaction_id"].tolist() == ["upload-row-000001", "upload-row-000002"]
+    assert transactions["timestamp"].is_monotonic_increasing
+    assert set(result["inferred"]) == {
+        "transaction_id", "timestamp", "user_id", "device_id", "card_id",
+        "billing_country", "ip_country", "merchant_category",
+    }
 
 
 class _Response:
@@ -83,6 +147,63 @@ def test_shuffled_upload_is_sent_to_api_in_chronological_order():
     )
     assert_frame_equal(actual, expected)
     assert [row["transaction_id"] for row in client.payload] == ordered["transaction_id"].tolist()
+
+
+def test_uploaded_dataset_is_scored_and_saved_through_one_backend_endpoint():
+    class DatasetClient:
+        def __init__(self):
+            self.url = None
+            self.payload = None
+
+        def post(self, url, json, timeout):
+            self.url = url
+            self.payload = json
+            results = [
+                {"score": row["amount"] / 1_000, "flagged": False, "blocked": False, "reasons": []}
+                for row in json["transactions"]
+            ]
+            return _Response({
+                "dataset_id": "dataset-123",
+                "filename": json["filename"],
+                "row_count": len(results),
+                "results": results,
+            })
+
+    client = DatasetClient()
+    shuffled = _transactions().sample(frac=1, random_state=11).reset_index(drop=True)
+
+    result = score_and_save_uploaded_dataset(
+        shuffled, "transactions.csv", "http://scoring.test", http_client=client
+    )
+
+    assert client.url == "http://scoring.test/datasets/score"
+    assert client.payload["filename"] == "transactions.csv"
+    assert [row["transaction_id"] for row in client.payload["transactions"]] == (
+        chronological_transactions(_transactions())["transaction_id"].tolist()
+    )
+    assert result["dataset_id"] == "dataset-123"
+    assert result["scored"]["transaction_id"].tolist() == [
+        "order-0", "order-1", "order-2", "order-3", "order-4"
+    ]
+
+
+def test_scored_upload_becomes_dashboard_transaction_data():
+    scored = _transactions().iloc[:2].assign(
+        currency=["INR", "USD"],
+        score=[0.81, 0.31],
+        flagged=[True, True],
+        blocked=[True, False],
+        reasons=[["high amount"], ["below threshold"]],
+    )
+
+    dashboard = uploaded_scores_to_dashboard_transactions(scored, review_threshold=.23)
+
+    assert dashboard["payment_id"].tolist() == ["order-1", "order-0"]
+    assert dashboard["email"].tolist() == ["order-user", "order-user"]
+    assert dashboard["currency"].tolist() == ["USD", "INR"]
+    assert dashboard["risk_score"].tolist() == [.31, .81]
+    assert dashboard["risk_status"].tolist() == ["High risk", "High risk"]
+    assert dashboard["status"].tolist() == ["flagged", "flagged"]
 
 
 def test_transaction_date_filter_is_inclusive():

@@ -1,10 +1,10 @@
+from pathlib import Path
+
 import pytest
-import requests
 from streamlit.testing.v1 import AppTest
 
 import frontend.processing as processing
 import frontend.razorpay_oauth as razorpay_oauth
-import backend.src.razorpay_enforcement as enforcement
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -18,6 +18,46 @@ def navigate(app, view):
     return next(radio for radio in app.radio if radio.label == "Navigation").set_value(view).run()
 
 
+def test_investigation_hidden_controls_do_not_clip_the_page_container():
+    css = Path("frontend/redesign.css").read_text()
+
+    assert 'div[data-testid="stVerticalBlock"]:has(.ti-hidden-controls)' not in css
+    assert (
+        'div[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] '
+        '.ti-hidden-controls)'
+    ) in css
+
+
+def test_case_metric_icons_use_material_ligatures_inside_their_circle():
+    css = Path("frontend/redesign.css").read_text()
+    icon_rule = css.split(".cm-metric-icon {", 1)[1].split("}", 1)[0]
+
+    assert "font-feature-settings: 'liga'" in icon_rule
+    assert "-webkit-font-feature-settings: 'liga'" in icon_rule
+    assert ".cm-metric-icon" in css
+
+
+def test_case_metric_text_styles_do_not_override_icon_layout():
+    css = Path("frontend/redesign.css").read_text()
+    app_source = Path("frontend/app.py").read_text()
+
+    assert ".cm-metric span {" not in css
+    assert ".cm-metric > div > span {" in css
+    assert 'class="cm-trend-icon"' in app_source
+
+
+def test_transaction_metric_cards_share_a_responsive_grid_row():
+    css = Path("frontend/redesign.css").read_text()
+    metric_rule = css.split(
+        'div[data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]) {',
+        1,
+    )[1].split("}", 1)[0]
+
+    assert "display: grid" in metric_rule
+    assert "grid-template-columns: repeat(4, minmax(0, 1fr))" in metric_rule
+    assert "align-items: stretch" in metric_rule
+
+
 def test_dashboard_opens_directly_in_demo_mode(monkeypatch):
     monkeypatch.setenv("RAZORPAY_AUTH_DISABLED", "false")
     monkeypatch.delenv("RAZORPAY_CLIENT_ID", raising=False)
@@ -27,10 +67,10 @@ def test_dashboard_opens_directly_in_demo_mode(monkeypatch):
     app = AppTest.from_file("frontend/app.py", default_timeout=90).run()
 
     assert not app.exception
-    assert any("Demo mode" in markdown.value for markdown in app.markdown)
-    assert any("Review queue" in markdown.value for markdown in app.markdown)
-    assert app.dataframe
-    assert app.metric
+    assert any("Fraud Spike Detection" in markdown.value for markdown in app.markdown)
+    assert any("High-Risk Transactions" in markdown.value for markdown in app.markdown)
+    assert not any("Review queue" in radio.options for radio in app.radio)
+    assert not any("Demo every case in one session" in markdown.value for markdown in app.markdown)
     assert not any("Connect a Razorpay account" in markdown.value for markdown in app.markdown)
 
 
@@ -59,143 +99,71 @@ def test_demo_dashboard_opens_transaction_dashboard_without_credentials(monkeypa
     open_demo(app)
 
     assert not app.exception
-    assert any("Demo mode" in markdown.value for markdown in app.markdown)
-    assert any("Review queue" in markdown.value for markdown in app.markdown)
-    assert any("Simulation only" in markdown.value for markdown in app.markdown)
-    assert any("Demo every case" in markdown.value for markdown in app.markdown)
-    assert any("Demo boundary" in markdown.value for markdown in app.markdown)
-    demo_tables = [frame.value for frame in app.dataframe if "Case" in frame.value.columns]
-    assert len(demo_tables) == 1
-    assert demo_tables[0]["Case"].tolist() == [
-        "Low risk / allowed", "Review band", "High risk / report", "False positive", "False negative"
-    ]
+    assert any("Fraud Spike Detection" in markdown.value for markdown in app.markdown)
+    assert any("Transaction Trend" in markdown.value for markdown in app.markdown)
+    assert any("Fraud Spike Detected!" in markdown.value for markdown in app.markdown)
 
     navigate(app, "Transaction explorer")
     assert not app.exception
     assert len(app.dataframe) == 1
-    assert len(app.dataframe[0].value) == 80
-    assert list(app.dataframe[0].value.columns) == [
-        "Txn", "Amount", "Method", "Velocity", "IP/Billing", "Device", "Score",
-        "Risk", "Payment status",
+    explorer_table = app.dataframe[0].value
+    explorer_table = getattr(explorer_table, "data", explorer_table)
+    assert len(explorer_table) == 80
+    assert list(explorer_table.columns) == [
+        "Transaction ID", "Date & Time", "Customer", "Amount", "Payment method",
+        "Risk score", "Status", "Payment status",
     ]
-    assert {"Transactions", "Captured", "Failed", "Captured value"} == {
-        metric.label for metric in app.metric
-    }
+    assert set(explorer_table["Status"].unique()) <= {"Flagged", "Review", "Legit"}
+    metric_labels = " ".join(metric.label for metric in app.metric)
+    for expected in ("Total transactions", "Flagged transactions", "Total transaction amount", "Avg. transaction amount"):
+        assert expected in metric_labels
     assert not any(button.label == "Generate full evidence report" for button in app.button)
 
-    navigate(app, "Fraud overview")
+    navigate(app, "Overview")
     assert not app.exception
-    assert any("Held-out model performance" in markdown.value for markdown in app.markdown)
-    assert any("Threshold sensitivity explorer" in markdown.value for markdown in app.markdown)
-    assert any("What drives the model's score" in markdown.value for markdown in app.markdown)
-    assert any("Top alerts" in markdown.value for markdown in app.markdown)
-
-    navigate(app, "Fraud alerts")
-    assert not app.exception
-    assert any("How to use this queue" in markdown.value for markdown in app.markdown)
-    assert {"Needs analyst review", "High priority", "Review band"}.issubset(
-        {metric.label for metric in app.metric}
-    )
-    review_button = next(
-        button for button in app.button if button.label == "Review transaction →"
-    )
-    review_button.click().run()
-    assert app.session_state["fraudlens_view"] == "Transaction investigation"
-    assert app.session_state["investigation_payment_id"]
+    assert any("Fraud Spike Detection" in markdown.value for markdown in app.markdown)
+    assert any("Detect Spikes" in markdown.value for markdown in app.markdown)
+    assert any("High-Risk Transactions" in markdown.value for markdown in app.markdown)
 
     navigate(app, "Transaction investigation")
     assert not app.exception
     assert any(button.label == "Generate full evidence report" for button in app.button)
-    assert len(app.chat_input) == 1
+    assert not app.chat_input
+    assert any(widget.label == "Ask about this transaction" for widget in app.text_input)
+    assert any(button.label == "Send question" for button in app.button)
+    assert any(button.label == "Previous transaction" for button in app.button)
+    assert any(button.label == "Next transaction" for button in app.button)
+    assert not any(
+        "This transaction is flagged due to several high-risk indicators" in markdown.value
+        for markdown in app.markdown
+    )
 
     navigate(app, "Case management")
     assert not app.exception
-    assert any("Case management" in markdown.value for markdown in app.markdown)
+    assert any("Case Management" in markdown.value for markdown in app.markdown)
 
 
-def test_mock_enforcement_capture_is_session_only_and_makes_no_http_calls(monkeypatch):
-    outbound_calls = []
-
-    def reject_network(self, method, url, *args, **kwargs):
-        outbound_calls.append((method, url))
-        raise AssertionError("mock enforcement must not make an HTTP request")
-
-    monkeypatch.setattr(requests.sessions.Session, "request", reject_network)
-    monkeypatch.setenv("RAZORPAY_AUTH_DISABLED", "false")
+def test_transaction_investigation_submits_questions_to_the_backend_client(monkeypatch):
     monkeypatch.setenv("RAZORPAY_MOCK_AUTH", "true")
-    monkeypatch.delenv("RAZORPAY_CLIENT_ID", raising=False)
-    monkeypatch.delenv("RAZORPAY_CLIENT_SECRET", raising=False)
-    monkeypatch.delenv("RAZORPAY_REDIRECT_URI", raising=False)
-    app = AppTest.from_file("frontend/app.py", default_timeout=90).run()
-    open_demo(app)
-
-    assert any(
-        "Simulation only — no Razorpay API call or real money movement" in markdown.value
-        for markdown in app.markdown
+    monkeypatch.setattr(
+        processing,
+        "ask_preview_transaction_question",
+        lambda transaction, question, history, _url: {
+            "status": "generated",
+            "transaction_id": transaction["transaction_id"],
+            "answer": f"Backend answer for: {question}",
+            "provider": "grounded-rules",
+        },
     )
-    next(button for button in app.button if button.label == "Approve & capture").click().run()
+    app = AppTest.from_file("frontend/app.py", default_timeout=90).run()
+    navigate(app, "Transaction investigation")
+
+    question = next(widget for widget in app.text_input if widget.label == "Ask about this transaction")
+    question.set_value("Why was this flagged?").run()
+    next(button for button in app.button if button.label == "Send question").click().run()
 
     assert not app.exception
-    assert outbound_calls == []
-    assert app.session_state["mock_enforcement_scenarios"]["authorized"]["status"] == "Captured"
-    audit = app.session_state["mock_enforcement_audit"]
-    assert audit[-1]["Reviewer"] == "Demo Reviewer"
-    assert audit[-1]["Action"] == "Approve & capture"
-    assert audit[-1]["Resulting status"] == "Captured"
-
-
-def test_mock_fraud_confirmation_stops_fulfillment_and_explains_auto_refund(monkeypatch):
-    outbound_calls = []
-    monkeypatch.setattr(
-        requests.sessions.Session,
-        "request",
-        lambda self, method, url, *args, **kwargs: outbound_calls.append((method, url)),
-    )
-    monkeypatch.setenv("RAZORPAY_AUTH_DISABLED", "false")
-    monkeypatch.setenv("RAZORPAY_MOCK_AUTH", "true")
-    monkeypatch.delenv("RAZORPAY_CLIENT_ID", raising=False)
-    monkeypatch.delenv("RAZORPAY_CLIENT_SECRET", raising=False)
-    monkeypatch.delenv("RAZORPAY_REDIRECT_URI", raising=False)
-    app = AppTest.from_file("frontend/app.py", default_timeout=90).run()
-    open_demo(app)
-
-    next(
-        button for button in app.button
-        if button.label == "Confirm fraud & release authorization"
-    ).click().run()
-
-    scenario = app.session_state["mock_enforcement_scenarios"]["authorized"]
-    assert scenario["status"] == "Capture withheld"
-    assert scenario["fulfillment_status"] == "Stopped"
-    assert outbound_calls == []
-    assert any("automatic refund" in warning.value for warning in app.warning)
-
-
-def test_mock_captured_edge_case_refunds_only_in_session_state(monkeypatch):
-    outbound_calls = []
-    monkeypatch.setattr(
-        requests.sessions.Session,
-        "request",
-        lambda self, method, url, *args, **kwargs: outbound_calls.append((method, url)),
-    )
-    monkeypatch.setenv("RAZORPAY_AUTH_DISABLED", "false")
-    monkeypatch.setenv("RAZORPAY_MOCK_AUTH", "true")
-    monkeypatch.delenv("RAZORPAY_CLIENT_ID", raising=False)
-    monkeypatch.delenv("RAZORPAY_CLIENT_SECRET", raising=False)
-    monkeypatch.delenv("RAZORPAY_REDIRECT_URI", raising=False)
-    app = AppTest.from_file("frontend/app.py", default_timeout=90).run()
-    open_demo(app)
-    next(radio for radio in app.radio if radio.label == "Demo enforcement scenario").set_value(
-        "captured"
-    ).run()
-
-    next(button for button in app.button if button.label == "Refund & stop fulfillment").click().run()
-
-    scenario = app.session_state["mock_enforcement_scenarios"]["captured"]
-    assert scenario["status"] == "Refunded"
-    assert scenario["fulfillment_status"] == "Stopped"
-    assert outbound_calls == []
-    assert app.session_state["mock_enforcement_audit"][-1]["Action"] == "Refund & stop fulfillment"
+    assert any("Backend answer for: Why was this flagged?" in markdown.value for markdown in app.markdown)
 
 
 def test_connected_dashboard_loads_and_filters_razorpay_transactions(monkeypatch):
@@ -245,17 +213,21 @@ def test_connected_dashboard_loads_and_filters_razorpay_transactions(monkeypatch
         for info in app.info
     )
     assert not app.tabs
-    assert not app.get("file_uploader")
+    assert len(app.get("file_uploader")) == 1
+    assert app.get("file_uploader")[0].label == "Attach transactions CSV"
+    assert any(button.label == "Run model" for button in app.button)
     assert [date_input.label for date_input in app.date_input] == ["Transaction date range (UTC)"]
     assert {widget.label for widget in app.multiselect} == {"Status", "Payment method", "Currency"}
-    assert [widget.label for widget in app.text_input] == ["Search"]
+    assert [widget.label for widget in app.text_input] == ["Search", "Search"]
     assert [widget.label for widget in app.checkbox] == ["International payments only"]
-    assert {metric.label: metric.value for metric in app.metric} == {
-        "Transactions": "2",
-        "Captured": "1",
-        "Failed": "1",
-        "Captured value": "₹125.00",
-    }
+
+    def _metric_value(fragment):
+        return next(metric.value for metric in app.metric if fragment in metric.label)
+
+    assert _metric_value("Total transactions") == "2"
+    assert _metric_value("Captured") == "1"
+    assert _metric_value("Total transaction amount") == "₹175.00"
+    assert _metric_value("Avg. transaction amount") == "₹87.50"
     assert len(app.dataframe) == 1
     assert app.dataframe[0].value["payment_id"].tolist() == ["pay_captured", "pay_failed"]
     assert "risk_score" not in app.dataframe[0].value.columns
@@ -266,8 +238,7 @@ def test_connected_dashboard_loads_and_filters_razorpay_transactions(monkeypatch
 
     next(widget for widget in app.multiselect if widget.label == "Status").select("failed").run()
     assert not app.exception
-    metrics = {metric.label: metric.value for metric in app.metric}
-    assert metrics["Transactions"] == "1"
+    assert _metric_value("Total transactions") == "1"
     assert app.dataframe[0].value["payment_id"].tolist() == ["pay_failed"]
 
 
@@ -299,111 +270,6 @@ def test_connected_dashboard_converts_zero_decimal_currency(monkeypatch):
     assert app.dataframe[0].value.iloc[0]["amount"] == 12_500.0
 
 
-def test_pending_real_payment_requires_human_identity_and_click_to_capture(monkeypatch, tmp_path):
-    database = tmp_path / "enforcement.sqlite3"
-    monkeypatch.setenv("RAZORPAY_AUTH_DISABLED", "true")
-    monkeypatch.setenv("RAZORPAY_MODE", "test")
-    monkeypatch.setenv("RAZORPAY_ENFORCEMENT_DB", str(database))
-    payment = {
-        "id": "pay_pending_review",
-        "order_id": "order_pending_review",
-        "created_at": 1_787_862_400,
-        "amount": 12_500,
-        "currency": "INR",
-        "status": "authorized",
-        "captured": False,
-        "method": "card",
-    }
-    store = enforcement.ReviewStore(database)
-    store.process_event(
-        "event_pending_review",
-        {"event": "payment.authorized", "payload": {"payment": {"entity": payment}}},
-    )
-    gateway = type("Gateway", (), {
-        "capture_calls": [],
-        "fetch_payment": lambda self, payment_id: dict(payment),
-        "fetch_order": lambda self, order_id: {
-            "id": order_id, "amount": payment["amount"], "currency": payment["currency"],
-        },
-        "capture_payment": lambda self, payment_id, *, amount, currency: (
-            self.capture_calls.append((payment_id, amount, currency))
-            or {"id": payment_id, "status": "captured", "captured": True}
-        ),
-    })()
-    monkeypatch.setattr(enforcement, "RazorpayGateway", lambda _token: gateway)
-    monkeypatch.setattr(razorpay_oauth, "fetch_payments", lambda *_args, **_kwargs: [payment])
-    app = AppTest.from_file("frontend/app.py", default_timeout=90)
-    app.session_state["razorpay_connection"] = {
-        "access_token": "test-access-token",
-        "razorpay_account_id": "acc_test",
-        "mode": "test",
-    }
-
-    app.run()
-
-    assert not app.exception
-    assert any("Human-approved Test Mode enforcement" in value.value for value in app.markdown)
-    assert any(button.label == "Approve & capture" for button in app.button)
-    assert any(button.label == "Confirm fraud & release authorization" for button in app.button)
-    next(widget for widget in app.text_input if widget.label == "Reviewer identity").set_value(
-        "reviewer@example.com"
-    )
-    next(button for button in app.button if button.label == "Approve & capture").click().run()
-
-    assert not app.exception
-    assert gateway.capture_calls == [("pay_pending_review", 12500, "INR")]
-    assert enforcement.ReviewStore(database).get_review("pay_pending_review")["review_status"] == "approved_captured"
-
-
-def test_already_captured_review_offers_human_triggered_full_refund(monkeypatch, tmp_path):
-    database = tmp_path / "enforcement.sqlite3"
-    monkeypatch.setenv("RAZORPAY_AUTH_DISABLED", "true")
-    monkeypatch.setenv("RAZORPAY_MODE", "test")
-    monkeypatch.setenv("RAZORPAY_ENFORCEMENT_DB", str(database))
-    payment = {
-        "id": "pay_refund_review",
-        "order_id": "order_refund_review",
-        "created_at": 1_787_862_400,
-        "amount": 8_000,
-        "amount_refunded": 0,
-        "currency": "INR",
-        "status": "captured",
-        "captured": True,
-        "method": "card",
-    }
-    store = enforcement.ReviewStore(database)
-    store.process_event(
-        "event_refund_review",
-        {"event": "payment.authorized", "payload": {"payment": {"entity": payment}}},
-    )
-    gateway = type("Gateway", (), {
-        "refund_calls": [],
-        "fetch_payment": lambda self, payment_id: dict(payment),
-        "refund_payment": lambda self, payment_id, *, idempotency_key: (
-            self.refund_calls.append((payment_id, idempotency_key))
-            or {"id": "rfnd_test", "status": "processed"}
-        ),
-    })()
-    monkeypatch.setattr(enforcement, "RazorpayGateway", lambda _token: gateway)
-    monkeypatch.setattr(razorpay_oauth, "fetch_payments", lambda *_args, **_kwargs: [payment])
-    app = AppTest.from_file("frontend/app.py", default_timeout=90)
-    app.session_state["razorpay_connection"] = {
-        "access_token": "test-access-token",
-        "razorpay_account_id": "acc_test",
-        "mode": "test",
-    }
-
-    app.run()
-    next(widget for widget in app.text_input if widget.label == "Reviewer identity").set_value(
-        "reviewer@example.com"
-    )
-    next(button for button in app.button if button.label == "Refund & stop fulfillment").click().run()
-
-    assert not app.exception
-    assert len(gateway.refund_calls) == 1
-    assert enforcement.ReviewStore(database).get_review("pay_refund_review")["review_status"] == "refunded"
-
-
 def test_disconnect_revokes_razorpay_access_before_clearing_session(monkeypatch):
     revoked = []
     monkeypatch.setenv("RAZORPAY_AUTH_DISABLED", "false")
@@ -433,6 +299,7 @@ def test_disconnect_revokes_razorpay_access_before_clearing_session(monkeypatch)
         "razorpay_account_id": "acc_test",
     }
     app.run()
+    navigate(app, "Overview")
 
     next(button for button in app.button if button.label == "Disconnect").click().run()
 
@@ -479,7 +346,7 @@ def test_mock_report_is_generated_and_rendered_as_the_walkthrough_highlight(monk
     )
 
 
-def test_mock_demo_shortcuts_route_to_each_review_surface(monkeypatch):
+def test_transaction_explorer_offers_a_csv_batch_tester(monkeypatch):
     monkeypatch.setenv("RAZORPAY_AUTH_DISABLED", "false")
     monkeypatch.setenv("RAZORPAY_MOCK_AUTH", "true")
     monkeypatch.delenv("RAZORPAY_CLIENT_ID", raising=False)
@@ -488,20 +355,18 @@ def test_mock_demo_shortcuts_route_to_each_review_surface(monkeypatch):
 
     app = AppTest.from_file("frontend/app.py", default_timeout=90).run()
     open_demo(app)
+    navigate(app, "Transaction explorer")
 
-    next(button for button in app.button if button.label == "Investigate top alert").click().run()
-    assert app.session_state["fraudlens_view"] == "Transaction investigation"
-    assert app.session_state["demo_report_payment_id"]
-    assert app.session_state["investigation_payment_id"]
-
-    navigate(app, "Review queue")
-    next(button for button in app.button if button.label == "Open fraud overview").click().run()
-    assert app.session_state["fraudlens_view"] == "Fraud overview"
-
-    navigate(app, "Review queue")
-    next(button for button in app.button if button.label == "Explore all transactions").click().run()
-    assert app.session_state["fraudlens_view"] == "Transaction explorer"
-
-    navigate(app, "Review queue")
-    next(button for button in app.button if button.label == "Open case management").click().run()
-    assert app.session_state["fraudlens_view"] == "Case management"
+    assert not app.exception
+    assert not app.get("expander")
+    assert any("Run the fraud model on a CSV" in markdown.value for markdown in app.markdown)
+    uploaders = app.get("file_uploader")
+    assert len(uploaders) == 1
+    assert uploaders[0].label == "Attach transactions CSV"
+    assert any(button.label == "Run model" for button in app.button)
+    assert any(button.label == "Download CSV template" for button in app.get("download_button"))
+    assert any(
+        "transaction_id, timestamp, user_id, device_id, card_id, amount, billing_country, "
+        "ip_country, merchant_category" in caption.value
+        for caption in app.caption
+    )

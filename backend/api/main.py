@@ -12,7 +12,9 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 from backend.src.score import FraudScorer
+from backend.src.global_importance import compute_featured_importance
 from backend.src.case_store import CaseStore
+from backend.src.dataset_store import DatasetStore
 from backend.src.razorpay_enforcement import ReviewStore, verify_webhook_signature
 from backend.src.review_store import (
     SupabaseReviewStore,
@@ -44,6 +46,8 @@ class Transaction(BaseModel):
     billing_country: str
     ip_country: str
     merchant_category: str
+    uploaded_velocity_per_hour: float | None = Field(default=None, ge=0)
+    ip_address: str | None = None
 
 
 class ScoreResponse(BaseModel):
@@ -73,6 +77,22 @@ class DemoReportRequest(BaseModel):
     threshold: float = Field(default=.65, ge=0, le=1)
 
 
+class DatasetScoreRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    transactions: list[Transaction] = Field(min_length=1, max_length=10_000)
+
+
+class DatasetScoreResponse(BaseModel):
+    dataset_id: str | None
+    filename: str
+    row_count: int
+    results: list[dict[str, Any]]
+    storage_status: Literal["saved", "unavailable"]
+    storage_error: str | None = None
+    signal_importance_percent: dict[str, float]
+    decision_threshold: float
+
+
 class CaseStatusRequest(BaseModel):
     status: str
     actor: str = ""
@@ -89,6 +109,43 @@ def _case_store() -> CaseStore:
         return CaseStore.from_environment()
     except SupabaseStoreError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _dataset_store() -> DatasetStore:
+    return DatasetStore.from_environment()
+
+
+def _independent_batch(transactions: list[Transaction]) -> pd.DataFrame:
+    """Score one uploaded dataset with state isolated from every other upload."""
+    payloads = []
+    for transaction in transactions:
+        payload = transaction.model_dump()
+        payload["timestamp"] = payload["timestamp"].isoformat()
+        payloads.append(payload)
+    frame = pd.DataFrame(payloads)
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="raise")
+    frame = frame.sort_values(["timestamp", "transaction_id"], kind="mergesort", ignore_index=True)
+    scored = FraudScorer().score_batch(frame)
+    for row in scored.to_dict(orient="records"):
+        report_contexts[str(row["transaction_id"])] = row
+    return scored
+
+
+def _score_results(scored: pd.DataFrame) -> list[dict[str, Any]]:
+    display_columns = [
+        "transaction_id", "timestamp", "user_id", "device_id", "card_id", "amount",
+        "billing_country", "ip_country", "merchant_category", "uploaded_velocity_per_hour",
+        "ip_address", "card_txn_count_1h", "device_txn_count_1h", "card_txn_count_24h",
+        "device_txn_count_24h", "geo_mismatch", "is_new_device", "user_amount_zscore",
+        "amount_to_user_mean_ratio", "score", "flagged", "blocked", "reasons",
+    ]
+    available_columns = [column for column in display_columns if column in scored.columns]
+    records = scored[available_columns].to_dict(orient="records")
+    for record in records:
+        timestamp = record.get("timestamp")
+        if hasattr(timestamp, "isoformat"):
+            record["timestamp"] = timestamp.isoformat()
+    return records
 
 
 @app.get("/health")
@@ -166,24 +223,48 @@ def score(transaction: Transaction, include_report: bool = False) -> dict:
 
 @app.post("/score/batch", response_model=list[ScoreResponse])
 def score_batch(transactions: list[Transaction]) -> list[dict]:
-    """Score one chronological batch while preserving point-in-time state."""
+    """Score an independent chronological upload with point-in-time features."""
     if not transactions:
         return []
-    payloads = []
-    for transaction in transactions:
-        payload = transaction.model_dump()
-        payload["timestamp"] = payload["timestamp"].isoformat()
-        payloads.append(payload)
-    frame = pd.DataFrame(payloads)
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="raise")
-    frame = frame.sort_values(["timestamp", "transaction_id"], kind="mergesort", ignore_index=True)
     try:
-        scored = scorer.score_batch(frame)
+        scored = _independent_batch(transactions)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    for row in scored.to_dict(orient="records"):
-        report_contexts[str(row["transaction_id"])] = row
-    return scored[["score", "flagged", "blocked", "reasons"]].to_dict(orient="records")
+    return _score_results(scored)
+
+
+@app.post("/datasets/score", response_model=DatasetScoreResponse)
+def score_and_store_dataset(request: DatasetScoreRequest) -> dict[str, Any]:
+    """Score an upload and persist it when storage is available.
+
+    Scoring and persistence have separate outcomes: a temporary database/schema
+    problem must not discard a completed model result.
+    """
+    try:
+        scored = _independent_batch(request.transactions)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    dataset_id = None
+    storage_status = "saved"
+    storage_error = None
+    try:
+        dataset_id = _dataset_store().save_scored_dataset(request.filename, scored)
+    except SupabaseStoreError as exc:
+        storage_status = "unavailable"
+        storage_error = str(exc)
+    return {
+        "dataset_id": dataset_id,
+        "filename": request.filename,
+        "row_count": len(scored),
+        "results": _score_results(scored),
+        "storage_status": storage_status,
+        "storage_error": storage_error,
+        "signal_importance_percent": compute_featured_importance(
+            scored, scorer.explanation_model
+        ),
+        "decision_threshold": scorer.threshold,
+    }
 
 
 @app.post("/report/{transaction_id}", response_model=dict[str, Any])

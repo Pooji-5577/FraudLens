@@ -244,3 +244,49 @@ def test_preview_chat_accepts_razorpay_payment_fields(monkeypatch):
     assert captured["context"]["transaction"]["payment_id"] == "pay_123"
     assert captured["context"]["transaction"]["status"] == "captured"
     assert result["transaction_id"] == "pay_123"
+
+
+def test_scored_transaction_chat_has_a_grounded_backend_fallback_without_azure(monkeypatch):
+    for name in AZURE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    row = engineer_features(_transactions()).iloc[-1].to_dict()
+
+    result = answer_transaction_question(
+        row,
+        .82,
+        True,
+        .26,
+        ["Billing country IN, but IP country RU"],
+        "Why was this transaction flagged?",
+    )
+
+    assert result["status"] == "generated"
+    assert result["provider"] == "grounded-rules"
+    assert "0.820" in result["answer"]
+    assert "Billing country IN, but IP country RU" in result["answer"]
+
+
+def test_preview_chat_has_a_grounded_backend_fallback_without_azure(monkeypatch):
+    for name in AZURE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    transaction = {
+        "payment_id": "pay_preview",
+        "amount": 32000.0,
+        "currency": "INR",
+        "risk_score": .88,
+        "risk_status": "High risk",
+        "velocity": 12,
+        "ip_billing_mismatch": True,
+        "new_device": True,
+        "amount_deviation": 72.0,
+    }
+
+    result = answer_preview_transaction_question(
+        transaction,
+        "Summarize risk factors",
+    )
+
+    assert result["status"] == "generated"
+    assert result["provider"] == "grounded-rules"
+    assert "12.0 transactions per hour" in result["answer"]
+    assert "new device" in result["answer"].lower()

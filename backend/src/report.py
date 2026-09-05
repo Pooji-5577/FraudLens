@@ -256,6 +256,84 @@ def transaction_chat_context(
     }
 
 
+def _grounded_transaction_answer(context: dict, question: str) -> str:
+    """Answer common reviewer questions without inventing facts or requiring an LLM."""
+    transaction = context.get("transaction") or {}
+    model = context.get("model") or {}
+    normalized = question.casefold()
+    transaction_id = transaction.get("transaction_id") or transaction.get("payment_id") or "this transaction"
+
+    if "amount" in normalized and not any(word in normalized for word in ("risk", "flag", "why")):
+        amount = transaction.get("amount")
+        currency = transaction.get("currency", "")
+        if amount is not None:
+            return f"The recorded amount for {transaction_id} is {currency} {float(amount):,.2f}.".replace("  ", " ")
+        return "The transaction context does not contain an amount."
+
+    if any(word in normalized for word in ("genuine", "legitimate", "fraudulent")):
+        return (
+            "The available transaction and model signals cannot verify the customer's identity or prove fraud. "
+            "Use the risk indicators as review evidence and verify the customer through your approved process."
+        )
+
+    if any(phrase in normalized for phrase in ("what should", "next", "recommend")):
+        return (
+            "Review the strongest recorded risk signals, compare them with the customer's known history, and "
+            "contact the customer through an approved channel if verification is needed. Record the evidence "
+            "before marking the case legitimate or escalating it."
+        )
+
+    score = model.get("score", transaction.get("risk_score"))
+    threshold = model.get("blocking_threshold") or transaction.get("review_threshold")
+    reasons = [
+        str(reason)
+        for reason in (model.get("reasons") or transaction.get("reasons") or [])
+        if reason
+    ]
+    facts: list[str] = []
+    velocity = transaction.get("velocity")
+    if velocity is not None:
+        velocity_value = float(velocity)
+        if velocity_value < 1:
+            facts.append(f"{velocity_value:.2f} transactions per hour")
+        else:
+            facts.append(f"{velocity_value:.1f} transactions per hour")
+    if transaction.get("ip_billing_mismatch") is True:
+        facts.append("IP and billing locations do not match")
+    if transaction.get("new_device") is True:
+        facts.append("a new device was used")
+    deviation = transaction.get("amount_deviation")
+    if deviation is not None:
+        facts.append(f"the amount differs from the recorded baseline by {float(deviation):+.0f}%")
+
+    if score is not None and threshold is not None:
+        blocked = bool(model.get("blocked") or transaction.get("risk_status") == "High risk")
+        decision = "is above" if blocked else "is below"
+        answer = (
+            f"This transaction has a model score of {float(score):.3f}. "
+            f"That {decision} the review threshold of {float(threshold):.3f}."
+        )
+        if reasons:
+            answer += " Main reasons: " + "; ".join(reasons[:4]) + "."
+        return answer
+    if score is not None:
+        label = transaction.get("risk_status")
+        answer = f"The visible risk score is {float(score):.3f}"
+        if label:
+            answer += f" ({label})"
+        if facts:
+            answer += ". Recorded risk factors: " + "; ".join(facts) + "."
+        else:
+            answer += ". No supporting risk factors are present in the supplied context."
+        return answer
+    if facts:
+        return "Recorded risk factors: " + "; ".join(facts) + "."
+    return (
+        f"I can only use the recorded fields for {transaction_id}. The supplied context does not contain "
+        "a model score or risk evidence for that question."
+    )
+
+
 def _azure_transaction_answer(
     config: AzureOpenAIConfig,
     context: dict,
@@ -309,21 +387,32 @@ def answer_transaction_question(
     history: list[dict] | None = None,
     answer_writer: Callable | None = None,
 ) -> dict | None:
-    """Answer from immutable scored context; missing AI config never affects scoring."""
+    """Answer from immutable scored context, with a grounded non-LLM fallback."""
+    context = transaction_chat_context(transaction, score, blocked, threshold, reasons)
     config = AzureOpenAIConfig.from_env()
     if config is None:
-        return None
-    context = transaction_chat_context(transaction, score, blocked, threshold, reasons)
+        return {
+            "status": "generated",
+            "answer": _grounded_transaction_answer(context, question),
+            "transaction_id": str(transaction["transaction_id"]),
+            "provider": "grounded-rules",
+        }
     writer = answer_writer or _azure_transaction_answer
     try:
         answer = writer(config, context, question, list(history or []))
-        return {"status": "generated", "answer": answer, "transaction_id": str(transaction["transaction_id"])}
+        return {
+            "status": "generated",
+            "answer": answer,
+            "transaction_id": str(transaction["transaction_id"]),
+            "provider": "azure-openai",
+        }
     except Exception:
         return {
-            "status": "failed",
-            "answer": None,
+            "status": "generated",
+            "answer": _grounded_transaction_answer(context, question),
             "transaction_id": str(transaction["transaction_id"]),
-            "error": "The AI answer could not be generated. The saved score and evidence are unchanged.",
+            "provider": "grounded-rules",
+            "warning": "Azure OpenAI was unavailable, so a deterministic evidence-grounded answer was used.",
         }
 
 
@@ -333,10 +422,7 @@ def answer_preview_transaction_question(
     history: list[dict] | None = None,
     answer_writer: Callable | None = None,
 ) -> dict | None:
-    """Answer from visible raw fields before model scoring is available."""
-    config = AzureOpenAIConfig.from_env()
-    if config is None:
-        return None
+    """Answer from visible raw fields, with a grounded non-LLM fallback."""
     context = {
         "transaction": {
             name: transaction.get(name)
@@ -345,26 +431,49 @@ def answer_preview_transaction_question(
                 "billing_country", "ip_country", "merchant_category", "payment_id", "currency",
                 "status", "method", "order_id", "email", "contact", "international",
                 "velocity", "ip_billing_mismatch", "new_device", "amount_deviation",
-                "risk_score", "risk_status", "actual",
+                "risk_score", "risk_status", "actual", "reasons", "review_threshold",
             )
             if transaction.get(name) is not None
         },
-        "model": {
-            "status": "not scored",
-            "note": "This chat describes Razorpay payment fields only. No fraud score or decision is available.",
-        },
+        "model": (
+            {
+                "score": float(transaction["risk_score"]),
+                "blocking_threshold": float(transaction.get("review_threshold") or 0),
+                "blocked": transaction.get("risk_status") == "High risk",
+                "reasons": list(transaction.get("reasons") or []),
+            }
+            if transaction.get("risk_score") is not None
+            else {
+                "status": "not scored",
+                "note": "This chat describes visible payment fields only. No fraud score is available.",
+            }
+        ),
     }
+    config = AzureOpenAIConfig.from_env()
+    transaction_id = transaction.get("transaction_id") or transaction.get("payment_id")
+    if config is None:
+        return {
+            "status": "generated",
+            "answer": _grounded_transaction_answer(context, question),
+            "transaction_id": str(transaction_id),
+            "provider": "grounded-rules",
+        }
     writer = answer_writer or _azure_transaction_answer
     try:
         answer = writer(config, context, question, list(history or []))
-        transaction_id = transaction.get("transaction_id") or transaction.get("payment_id")
-        return {"status": "generated", "answer": answer, "transaction_id": str(transaction_id)}
+        return {
+            "status": "generated",
+            "answer": answer,
+            "transaction_id": str(transaction_id),
+            "provider": "azure-openai",
+        }
     except Exception:
         return {
-            "status": "failed",
-            "answer": None,
-            "transaction_id": str(transaction.get("transaction_id") or transaction.get("payment_id")),
-            "error": "The AI answer could not be generated. The preview transaction is unchanged.",
+            "status": "generated",
+            "answer": _grounded_transaction_answer(context, question),
+            "transaction_id": str(transaction_id),
+            "provider": "grounded-rules",
+            "warning": "Azure OpenAI was unavailable, so a deterministic evidence-grounded answer was used.",
         }
 
 

@@ -13,6 +13,11 @@ python -m uvicorn backend.api.main:app --host 0.0.0.0 --port 8000
 
 Health check: <http://localhost:8000/health>
 
+`POST /datasets/score` runs the trained model on an uploaded transaction dataset and
+returns scores, decisions, reasons, and dataset-level signal influence. It also tries to
+store the parsed rows and outputs in Supabase. If Supabase migrations are not applied yet,
+the response still includes model results with `storage_status: "unavailable"`.
+
 API documentation: <http://localhost:8000/docs>
 
 Regenerate the model and global SHAP artifact:

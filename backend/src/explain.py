@@ -60,6 +60,21 @@ def _reason(feature: str, row: pd.Series) -> str:
         "amount_log": f"Transaction amount {row['amount']:,.0f} was a strong model signal",
         "hour_sin": f"Transaction time ({row['timestamp']}) contributed to the risk score",
         "hour_cos": f"Transaction time ({row['timestamp']}) contributed to the risk score",
+        "amount_to_user_mean_ratio": (
+            f"Amount was {value:.1f}x the customer's prior average"
+            if row["user_amount_mean"] > 0 else
+            "Amount was evaluated without enough prior customer history"
+        ),
+        "card_velocity_1h_log": (
+            f"Recent card velocity was {float(row['card_txn_count_1h']):.1f} transactions per hour"
+        ),
+        "device_velocity_1h_log": (
+            f"Recent device velocity was {float(row['device_txn_count_1h']):.1f} transactions per hour"
+        ),
+        "geo_new_device": "Geography mismatch combined with a new device increased risk",
+        "geo_amount_ratio": "Geography mismatch combined with amount size increased risk",
+        "new_device_amount_ratio": "New-device activity combined with amount size increased risk",
+        "rapid_repeat": "Transaction occurred soon after the customer's previous payment",
     }
     return reasons.get(feature, f"{feature}={value:.3g} increased risk")
 

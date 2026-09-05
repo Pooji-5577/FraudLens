@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 
 import pandas as pd
 import requests
@@ -15,6 +16,214 @@ class ScoringAPIError(RuntimeError):
 
 
 _FORMULA_TRIGGER_CHARS = ("=", "+", "-", "@", "\t", "\r")
+
+_UPLOAD_COLUMN_ALIASES = {
+    "transaction_id": {"transaction_id", "transaction", "transactionid", "txn", "txn_id", "txnid", "payment_id", "paymentid"},
+    "timestamp": {"timestamp", "transaction_time", "transactiontime", "created_at", "createdat", "date_time", "datetime", "time"},
+    "user_id": {"user_id", "userid", "user", "customer_id", "customerid", "customer"},
+    "device_id": {"device_id", "deviceid", "device", "device_name", "devicename"},
+    "card_id": {"card_id", "cardid", "card", "card_number", "cardnumber", "payment_instrument", "paymentinstrument"},
+    "amount": {"amount", "transaction_amount", "transactionamount", "value", "payment_amount", "paymentamount"},
+    "billing_country": {"billing_country", "billingcountry", "billing_country_code", "billingcountrycode", "country"},
+    "ip_country": {"ip_country", "ipcountry", "ip_country_code", "ipcountrycode", "location_country", "locationcountry"},
+    "merchant_category": {"merchant_category", "merchantcategory", "merchant_category_code", "merchantcategorycode", "mcc", "method", "payment_method", "paymentmethod"},
+    "uploaded_velocity_per_hour": {"velocity", "velocity_per_hour", "velocityperhour", "txn_velocity", "transaction_velocity"},
+    "ip_address": {"ip_address", "ipaddress", "ip", "client_ip", "clientip"},
+}
+
+
+def _normalized_upload_header(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value).lstrip("\ufeff").strip().casefold()).strip("_")
+
+
+def _parse_velocity_per_hour(value: object) -> float | None:
+    text = str(value).strip().casefold()
+    match = re.search(r"(\d+(?:\.\d+)?)", text)
+    if not match:
+        return None
+    count = float(match.group(1))
+    return count / 24.0 if "24" in text else count
+
+
+def _ip_country_from_address(value: object, billing_country: object) -> str:
+    """Best-effort fallback when a CSV has IP address but no IP country column."""
+    ip = str(value).strip()
+    billing = str(billing_country).strip().upper() or "UNKNOWN"
+    if not ip:
+        return billing
+    if ip.startswith(
+        ("10.", "127.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.",
+         "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
+         "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.")
+    ):
+        return billing
+    if billing == "IN" and ip.startswith(("49.36.", "103.21.", "106.51.")):
+        return "IN"
+    return "EXTERNAL"
+
+
+def normalize_uploaded_transactions(frame: pd.DataFrame) -> dict:
+    """Map common CSV headers and fill absent model inputs deterministically.
+
+    The fraud model has a fixed input contract. Uploads may use friendlier labels,
+    so this boundary recognizes aliases and supplies conservative placeholders for
+    fields the source does not contain. The returned metadata lets the UI disclose
+    every mapping and inference instead of silently pretending the source was complete.
+    """
+    if frame.empty:
+        raise ValueError("The uploaded CSV has no rows to score.")
+
+    source_by_normalized = {
+        _normalized_upload_header(column): column for column in frame.columns
+    }
+    selected: dict[str, object] = {}
+    mapped: dict[str, str] = {}
+    for target, aliases in _UPLOAD_COLUMN_ALIASES.items():
+        source = next(
+            (source_by_normalized[alias] for alias in aliases if alias in source_by_normalized),
+            None,
+        )
+        if source is not None:
+            selected[target] = source
+            mapped[str(source)] = target
+
+    row_numbers = pd.Series(range(1, len(frame) + 1), index=frame.index)
+    output = pd.DataFrame(index=frame.index)
+    inferred: list[str] = []
+
+    if "transaction_id" in selected:
+        output["transaction_id"] = frame[selected["transaction_id"]].astype(str).str.strip()
+    else:
+        output["transaction_id"] = row_numbers.map(lambda value: f"upload-row-{value:06d}")
+        inferred.append("transaction_id")
+
+    if "timestamp" in selected:
+        output["timestamp"] = pd.to_datetime(frame[selected["timestamp"]], utc=True, errors="raise")
+    else:
+        output["timestamp"] = pd.Timestamp("2000-01-01", tz="UTC") + pd.to_timedelta(
+            row_numbers - 1, unit="s"
+        )
+        inferred.append("timestamp")
+
+    currency = pd.Series("INR", index=frame.index, dtype="object")
+    if "amount" in selected:
+        raw_amount = frame[selected["amount"]]
+        detected_currency = raw_amount.astype(str).str.extract(r"\b([A-Za-z]{3})\b", expand=False)
+        currency = detected_currency.str.upper().fillna("INR")
+        cleaned_amount = raw_amount.astype(str).str.replace(",", "", regex=False).str.replace(
+            r"[^0-9.\-]", "", regex=True
+        )
+        output["amount"] = pd.to_numeric(cleaned_amount, errors="raise")
+    else:
+        output["amount"] = 0.0
+        inferred.append("amount")
+
+    if "user_id" in selected:
+        output["user_id"] = frame[selected["user_id"]].astype(str).str.strip()
+    else:
+        output["user_id"] = row_numbers.map(lambda value: f"inferred-user-{value:06d}")
+        inferred.append("user_id")
+
+    if "merchant_category" in selected:
+        output["merchant_category"] = frame[selected["merchant_category"]].astype(str).str.strip()
+    else:
+        output["merchant_category"] = "unknown"
+        inferred.append("merchant_category")
+
+    if "device_id" in selected:
+        output["device_id"] = frame[selected["device_id"]].astype(str).str.strip()
+    else:
+        output["device_id"] = "inferred-device-" + output["user_id"]
+        inferred.append("device_id")
+
+    if "card_id" in selected:
+        output["card_id"] = frame[selected["card_id"]].astype(str).str.strip()
+    else:
+        output["card_id"] = (
+            "inferred-card-" + output["user_id"] + "-" + output["merchant_category"]
+        )
+        inferred.append("card_id")
+
+    if "billing_country" in selected:
+        output["billing_country"] = frame[selected["billing_country"]].astype(str).str.strip().str.upper()
+    else:
+        output["billing_country"] = "UNKNOWN"
+        inferred.append("billing_country")
+
+    if "ip_country" in selected:
+        output["ip_country"] = frame[selected["ip_country"]].astype(str).str.strip().str.upper()
+    elif "ip_address" in selected:
+        output["ip_country"] = [
+            _ip_country_from_address(ip_address, billing_country)
+            for ip_address, billing_country in zip(
+                frame[selected["ip_address"]], output["billing_country"], strict=True
+            )
+        ]
+        mapped[str(selected["ip_address"])] = "ip_country"
+    else:
+        output["ip_country"] = output["billing_country"]
+        inferred.append("ip_country")
+
+    required_order = [
+        "transaction_id", "timestamp", "user_id", "device_id", "card_id", "amount",
+        "billing_country", "ip_country", "merchant_category",
+    ]
+    output["currency"] = currency
+    if "uploaded_velocity_per_hour" in selected:
+        output["uploaded_velocity_per_hour"] = frame[selected["uploaded_velocity_per_hour"]].map(
+            _parse_velocity_per_hour
+        )
+    if "ip_address" in selected:
+        output["ip_address"] = frame[selected["ip_address"]].astype(str).str.strip()
+    optional_order = [
+        column for column in ("currency", "uploaded_velocity_per_hour", "ip_address")
+        if column in output.columns
+    ]
+    ignored = [str(column) for column in frame.columns if str(column) not in mapped]
+    return {
+        "transactions": output.loc[:, [*required_order, *optional_order]].reset_index(drop=True),
+        "mapped": mapped,
+        "inferred": inferred,
+        "ignored": ignored,
+    }
+
+
+def uploaded_scores_to_dashboard_transactions(
+    scored: pd.DataFrame,
+    *,
+    review_threshold: float = .23,
+) -> pd.DataFrame:
+    """Adapt a scored upload to the transaction explorer's display contract."""
+    required = {"transaction_id", "timestamp", "user_id", "amount", "score", "flagged"}
+    missing = required - set(scored.columns)
+    if missing:
+        raise ValueError(f"scored upload is missing: {', '.join(sorted(missing))}")
+    result = pd.DataFrame(index=scored.index)
+    result["payment_id"] = scored["transaction_id"].astype(str)
+    result["created_at"] = pd.to_datetime(scored["timestamp"], utc=True, errors="raise")
+    result["amount"] = pd.to_numeric(scored["amount"], errors="raise")
+    result["currency"] = scored.get("currency", pd.Series("INR", index=scored.index)).fillna("INR")
+    result["status"] = scored["flagged"].map({True: "flagged", False: "scored"})
+    result["method"] = scored.get(
+        "merchant_category", pd.Series("unknown", index=scored.index)
+    ).astype(str)
+    result["order_id"] = ""
+    result["email"] = scored["user_id"].astype(str)
+    result["contact"] = ""
+    result["international"] = result["currency"].ne("INR")
+    result["velocity"] = scored.get("card_txn_count_1h", pd.Series(None, index=scored.index))
+    result["ip_billing_mismatch"] = scored.get("geo_mismatch", pd.Series(None, index=scored.index))
+    result["new_device"] = scored.get("is_new_device", pd.Series(None, index=scored.index))
+    result["amount_deviation"] = scored.get("user_amount_zscore", pd.Series(None, index=scored.index))
+    result["risk_score"] = pd.to_numeric(scored["score"], errors="raise")
+    flagged = scored["flagged"].astype(bool)
+    result["risk_status"] = result["risk_score"].map(
+        lambda score: "Review" if score >= review_threshold else "Low risk"
+    )
+    result.loc[flagged, "risk_status"] = "High risk"
+    result["actual"] = None
+    result["reasons"] = scored.get("reasons", pd.Series([[] for _ in range(len(scored))], index=scored.index))
+    return result.sort_values("created_at", ascending=False, ignore_index=True)
 
 
 def csv_injection_safe(frame: pd.DataFrame) -> pd.DataFrame:
@@ -293,6 +502,67 @@ def score_uploaded_transactions(
     for column in ("score", "flagged", "blocked", "reasons"):
         result[column] = [row[column] for row in results]
     return result
+
+
+def score_and_save_uploaded_dataset(
+    transactions: pd.DataFrame,
+    filename: str,
+    api_url: str,
+    timeout: float = 120.0,
+    http_client=requests,
+) -> dict:
+    """Score one upload through FastAPI and persist the rows through its server-side store."""
+    ordered = chronological_transactions(transactions)
+    payload = ordered.copy()
+    payload["timestamp"] = payload["timestamp"].map(lambda value: value.isoformat())
+    try:
+        response = http_client.post(
+            f"{api_url.rstrip('/')}/datasets/score",
+            json={"filename": filename, "transactions": payload.to_dict(orient="records")},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        body = response.json()
+    except requests.Timeout as exc:
+        raise ScoringAPIError("Dataset scoring timed out. Please try again.") from exc
+    except requests.ConnectionError as exc:
+        raise ScoringAPIError("The scoring service is offline or unreachable.") from exc
+    except requests.RequestException as exc:
+        detail = ""
+        if exc.response is not None:
+            try:
+                detail = exc.response.json().get("detail", "")
+            except ValueError:
+                pass
+        raise ScoringAPIError(detail or "The dataset could not be scored and saved.") from exc
+    except ValueError as exc:
+        raise ScoringAPIError("The scoring service returned an invalid dataset response.") from exc
+
+    required_body = {"dataset_id", "filename", "row_count", "results"}
+    required_result = {"score", "flagged", "blocked", "reasons"}
+    if not isinstance(body, dict) or not required_body <= body.keys():
+        raise ScoringAPIError("The scoring service returned an invalid dataset response.")
+    results = body["results"]
+    if (
+        not isinstance(results, list)
+        or len(results) != len(ordered)
+        or any(not isinstance(row, dict) or not required_result <= row.keys() for row in results)
+    ):
+        raise ScoringAPIError("The scoring service returned incomplete dataset results.")
+    scored = ordered.copy()
+    for column in ("score", "flagged", "blocked", "reasons"):
+        scored[column] = [row[column] for row in results]
+    dataset_id = body["dataset_id"]
+    return {
+        "dataset_id": str(dataset_id) if dataset_id is not None else None,
+        "filename": str(body["filename"]),
+        "row_count": int(body["row_count"]),
+        "scored": scored,
+        "storage_status": str(body.get("storage_status", "saved")),
+        "storage_error": body.get("storage_error"),
+        "signal_importance_percent": body.get("signal_importance_percent"),
+        "decision_threshold": body.get("decision_threshold"),
+    }
 
 
 def generate_transaction_report(

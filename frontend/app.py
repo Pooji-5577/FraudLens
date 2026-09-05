@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from textwrap import dedent
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -14,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 from frontend.processing import (
@@ -29,9 +31,12 @@ from frontend.processing import (
     list_fraud_cases,
     load_global_importance,
     load_threshold_curve,
+    normalize_uploaded_transactions,
     risk_audit_rows,
     risk_evidence_summary,
+    score_and_save_uploaded_dataset,
     set_fraud_case_status,
+    uploaded_scores_to_dashboard_transactions,
 )
 from frontend.mock_enforcement import apply_mock_action, initial_mock_scenarios
 from frontend.razorpay_oauth import (
@@ -61,6 +66,16 @@ CUT_LENS_MARK_SVG = (
     '</svg>'
 )
 
+FRAUDGUARD_SHIELD_SVG = (
+    '<svg viewBox="0 0 48 48" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">'
+    '<path d="M24 3.5 41 10v13.1c0 10.4-6.8 18.3-17 21.4C13.8 41.4 7 33.5 7 23.1V10L24 3.5Z" '
+    'fill="#4f7df3"/>'
+    '<path d="M24 9.5v28.2c6.7-2.6 10.9-8.1 10.9-14.6v-8.7L24 9.5Z" fill="#2f5fd7"/>'
+    '<path d="M24 12.4 14.1 16.1v7.1c0 5.8 3.8 10.7 9.9 13.2V12.4Z" fill="#7ea5ff"/>'
+    '<path d="M24 12.4v24c6.1-2.5 9.9-7.4 9.9-13.2v-7.1L24 12.4Z" fill="#5f8cff"/>'
+    '</svg>'
+)
+
 
 def brand_lockup(size: str = "26px", text_size: str = "1.05rem", text_color: str = "#eef4ff", stroke: str = "#5d94fc") -> str:
     mark = CUT_LENS_MARK_SVG.format(stroke=stroke)
@@ -68,6 +83,15 @@ def brand_lockup(size: str = "26px", text_size: str = "1.05rem", text_color: str
         f'<div class="brand-lockup" style="font-size:{text_size};color:{text_color};">'
         f'<span class="brand-mark" style="width:{size};height:{size};">{mark}</span>'
         f'<span>Fraud<span style="color:{stroke};">Lens</span></span></div>'
+    )
+
+
+def fraudguard_brand_lockup() -> str:
+    return (
+        '<div class="fraudguard-brand-lockup">'
+        f'<span class="fraudguard-brand-mark">{FRAUDGUARD_SHIELD_SVG}</span>'
+        '<span>FraudGuard</span>'
+        '</div>'
     )
 
 
@@ -100,6 +124,20 @@ CASE_STATUS_LABELS = {
     "false_positive": "False positive",
 }
 
+MODEL_LABELS = {
+    "tuned_xgboost_uncalibrated": "XGBoost (tuned)",
+    "tuned_xgboost_calibrated": "XGBoost (tuned, calibrated)",
+    "random_forest": "Random forest",
+    "logistic_regression": "Logistic regression",
+}
+
+RISK_STATUS_PILL_LABELS = {"High risk": "Flagged", "Review": "Review", "Low risk": "Legit"}
+PILL_COLORS = {
+    "Flagged": ("#d13b3b", "rgba(209, 59, 59, 0.09)"),
+    "Review": ("#b3760f", "rgba(179, 118, 15, 0.1)"),
+    "Legit": ("#1a7f37", "rgba(26, 127, 55, 0.1)"),
+}
+
 
 def _signal_reasons(row: pd.Series) -> list[str]:
     """Human-readable reason chips derived from a mock row's own risk signals."""
@@ -115,6 +153,40 @@ def _signal_reasons(row: pd.Series) -> list[str]:
     if deviation is not None and not pd.isna(deviation) and abs(float(deviation)) >= 50:
         reasons.append(f"Amount {float(deviation):+.0f}% vs. baseline")
     return reasons or ["Elevated composite risk score"]
+
+
+def _risk_indicator_cards(row: pd.Series) -> list[dict]:
+    """Icon-card view of the same four real signals as the fraud-signals table."""
+    velocity = int(row["velocity"])
+    deviation = float(row["amount_deviation"])
+    mismatch = bool(row["ip_billing_mismatch"])
+    new_device = bool(row["new_device"])
+    return [
+        {
+            "icon": "trending_up",
+            "title": "Transaction velocity",
+            "detail": f"{velocity} recent transactions",
+            "severity": "high" if velocity >= 8 else "medium" if velocity >= 4 else "low",
+        },
+        {
+            "icon": "location_on",
+            "title": "IP/billing geography",
+            "detail": "Mismatch" if mismatch else "Match",
+            "severity": "high" if mismatch else "low",
+        },
+        {
+            "icon": "devices",
+            "title": "Device history",
+            "detail": "New device" if new_device else "Known device",
+            "severity": "high" if new_device else "low",
+        },
+        {
+            "icon": "payments",
+            "title": "Amount deviation",
+            "detail": f"{deviation:+.0f}% vs. baseline",
+            "severity": "high" if abs(deviation) >= 75 else "medium" if abs(deviation) >= 30 else "low",
+        },
+    ]
 
 
 def oauth_is_configured() -> bool:
@@ -379,7 +451,7 @@ def render_mock_enforcement_panel() -> None:
         """
         <div class="mock-enforcement-shell">
           <div class="mock-enforcement-kicker">SIMULATED ENFORCEMENT WALKTHROUGH</div>
-          <h2>Review queue</h2>
+          <h2>Payment review</h2>
           <p>A payment the bank authorized but has not yet been captured. Review it before it settles.</p>
         </div>
         """,
@@ -543,16 +615,8 @@ def render_mock_demo_guide(transactions: pd.DataFrame) -> None:
         unsafe_allow_html=True,
     )
     st.markdown("#### Shortcuts for the live walkthrough")
-    shortcut_columns = st.columns(4)
+    shortcut_columns = st.columns(3)
     with shortcut_columns[0]:
-        st.button(
-            "Open fraud overview",
-            key="demo_open_overview",
-            use_container_width=True,
-            on_click=_open_demo_view,
-            args=("Fraud overview",),
-        )
-    with shortcut_columns[1]:
         st.button(
             "Investigate top alert",
             key="demo_open_investigation",
@@ -562,7 +626,7 @@ def render_mock_demo_guide(transactions: pd.DataFrame) -> None:
             on_click=_open_demo_view,
             args=("Transaction investigation", report_payment_id),
         )
-    with shortcut_columns[2]:
+    with shortcut_columns[1]:
         st.button(
             "Explore all transactions",
             key="demo_open_explorer",
@@ -570,7 +634,7 @@ def render_mock_demo_guide(transactions: pd.DataFrame) -> None:
             on_click=_open_demo_view,
             args=("Transaction explorer",),
         )
-    with shortcut_columns[3]:
+    with shortcut_columns[2]:
         st.button(
             "Open case management",
             key="demo_open_cases",
@@ -579,9 +643,9 @@ def render_mock_demo_guide(transactions: pd.DataFrame) -> None:
             args=("Case management",),
         )
     st.caption(
-        "Review queue (this page) covers Authorized → Approve & capture, Authorized → Confirm fraud & "
-        "release authorization, and Captured → Refund & stop fulfillment. Every action is session-only "
-        "in the demo session and is recorded in the visible audit log."
+        "The action panel below this tour covers Authorized → Approve & capture, Authorized → Confirm "
+        "fraud & release authorization, and Captured → Refund & stop fulfillment. Every action is "
+        "session-only in the demo session and is recorded in the visible audit log."
     )
 
 
@@ -639,45 +703,166 @@ def load_dashboard_transactions(*, show_date_filter: bool = False) -> pd.DataFra
     return payments_frame(st.session_state.get("razorpay_payments", []))
 
 
+def _render_fraud_parameters_panel(
+    filtered: pd.DataFrame,
+    *,
+    signal_importance: dict[str, float] | None = None,
+) -> None:
+    """Full-width panel: measured SHAP signal influence for the active dataset."""
+    with st.container(border=True):
+        st.markdown('<span class="explorer-panel-anchor"></span>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="explorer-panel-title">:material/tune: Fraud detection parameters</div>',
+            unsafe_allow_html=True,
+        )
+        caption = (
+            "Mean absolute SHAP influence calculated from the uploaded transactions."
+            if signal_importance
+            else "Real mean absolute SHAP signal importance from the held-out test set — read-only."
+        )
+        st.markdown(f'<div class="explorer-panel-caption">{caption}</div>', unsafe_allow_html=True)
+        try:
+            importance_values = signal_importance or load_global_importance(
+                GLOBAL_IMPORTANCE_PATH
+            )["signal_importance_percent"]
+            rows = "".join(
+                f'<div class="importance-row"><span>{signal}</span>'
+                f'<div class="importance-track"><div class="importance-fill" style="width:{percent}%"></div></div>'
+                f'<strong>{percent:.1f}%</strong></div>'
+                for signal, percent in importance_values.items()
+            )
+            st.markdown(f'<div class="importance-panel">{rows}</div>', unsafe_allow_html=True)
+        except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+            st.info(f"Signal importance unavailable: {exc}")
+
+
 def render_transactions_view(transactions: pd.DataFrame, *, is_mock: bool) -> None:
-    render_page_header(
-        "Transaction explorer" if is_mock else "Account transactions",
-        "Filterable by date, amount, status, geography, and device across every loaded transaction."
-        if is_mock else "Payment history loaded from the connected Razorpay Test Mode account.",
-    )
-    if is_mock:
+    st.markdown('<span class="transaction-explorer-route-label">Transaction explorer</span>', unsafe_allow_html=True)
+    upload_result = st.session_state.get("csv_tester_results")
+    using_upload = bool(upload_result and st.session_state.get("csv_tester_active"))
+    if using_upload:
+        transactions = uploaded_scores_to_dashboard_transactions(
+            upload_result["scored"],
+            review_threshold=float(upload_result.get("decision_threshold") or DEMO_REVIEW_THRESHOLD),
+        )
+    has_model_scores = is_mock or using_upload
+    loaded_range = st.session_state.get("razorpay_loaded_range")
+    header_col, meta_col = st.columns([2.2, 1.3], vertical_alignment="top")
+    with header_col:
+        render_page_header(
+            "Uploaded transaction results" if using_upload else "Transaction explorer" if is_mock else "Account transactions",
+            f"Reviewing {len(transactions):,} transactions scored from the uploaded CSV."
+            if using_upload else "Explore transactions, apply filters, and understand how fraud risk is computed."
+            if is_mock else "Payment history loaded from the connected Razorpay Test Mode account.",
+        )
+    with meta_col:
+        if loaded_range and not using_upload:
+            st.markdown(
+                '<div class="connection-bar" style="justify-content:center;margin-top:0.4rem;">'
+                f'<span class="connection-led"></span>{loaded_range[0]:%d %b %Y} – {loaded_range[1]:%d %b %Y}</div>',
+                unsafe_allow_html=True,
+            )
+        st.download_button(
+            "Export", csv_injection_safe(transactions).to_csv(index=False),
+            "razorpay_transactions.csv", mime="text/csv", use_container_width=True,
+            key="explorer_export_all",
+        )
+    if is_mock and not using_upload:
         st.info("Demo signals are simulated; they are not real Razorpay fraud findings.")
-    one, two, three, four = st.columns(4)
-    with one:
-        search = st.text_input("Search", placeholder="Payment ID, order ID, email…")
-        statuses = st.multiselect(
-            "Status", sorted(value for value in transactions["status"].dropna().unique() if value)
-        )
-    with two:
-        methods = st.multiselect(
-            "Payment method", sorted(value for value in transactions["method"].dropna().unique() if value)
-        )
-        currencies = st.multiselect(
-            "Currency", sorted(value for value in transactions["currency"].dropna().unique() if value)
-        )
-    with three:
-        risk_statuses = []
-        if transactions["risk_status"].notna().any():
-            risk_statuses = st.multiselect(
-                "Risk status",
-                [v for v in ("High risk", "Review", "Low risk") if v in set(transactions["risk_status"])],
+    elif using_upload:
+        st.info("The table, totals, flagged count, averages, and signal influence below use the uploaded CSV.")
+
+    prefill = st.session_state.pop("explorer_search_prefill", None)
+    if prefill is not None:
+        st.session_state["explorer_filter_search"] = prefill
+
+    with st.container(border=True):
+        st.markdown('<span class="filters-card-anchor"></span>', unsafe_allow_html=True)
+        title_col, clear_col = st.columns([4, 1], vertical_alignment="center")
+        with title_col:
+            st.markdown(
+                '<div class="filters-card-title">:material/filter_alt: Filters</div>', unsafe_allow_html=True
             )
-        international_only = st.checkbox("International payments only")
-    with four:
-        geography_filter = "Any"
-        device_filter = "Any"
-        if is_mock:
-            geography_filter = st.selectbox(
-                "Geography", ["Any", "Match", "Mismatch"], key="explorer_geography_filter"
+        with clear_col:
+            clear_clicked = st.button("Clear all", key="explorer_clear_filters", use_container_width=True)
+        if clear_clicked:
+            for key in (
+                "explorer_filter_search", "explorer_filter_status", "explorer_filter_method",
+                "explorer_filter_currency", "explorer_filter_risk_status", "explorer_filter_international",
+                "explorer_geography_filter", "explorer_device_filter", "explorer_amount_min",
+                "explorer_amount_max", "explorer_risk_min", "explorer_risk_max",
+            ):
+                st.session_state.pop(key, None)
+            st.rerun()
+        one, two, three, four = st.columns(4)
+        with one:
+            search = st.text_input(
+                "Search", placeholder="Payment ID, order ID, email…", key="explorer_filter_search"
             )
-            device_filter = st.selectbox(
-                "Device", ["Any", "Known", "New"], key="explorer_device_filter"
+            statuses = st.multiselect(
+                "Status", sorted(value for value in transactions["status"].dropna().unique() if value),
+                key="explorer_filter_status",
             )
+        with two:
+            methods = st.multiselect(
+                "Payment method", sorted(value for value in transactions["method"].dropna().unique() if value),
+                key="explorer_filter_method",
+            )
+            currencies = st.multiselect(
+                "Currency", sorted(value for value in transactions["currency"].dropna().unique() if value),
+                key="explorer_filter_currency",
+            )
+        with three:
+            st.caption("Amount range")
+            amount_min_col, amount_max_col = st.columns(2)
+            with amount_min_col:
+                min_amount = st.number_input(
+                    "Amount min", value=None, placeholder="Min", label_visibility="collapsed",
+                    key="explorer_amount_min",
+                )
+            with amount_max_col:
+                max_amount = st.number_input(
+                    "Amount max", value=None, placeholder="Max", label_visibility="collapsed",
+                    key="explorer_amount_max",
+                )
+            international_only = st.checkbox(
+                "International payments only", key="explorer_filter_international"
+            )
+        with four:
+            risk_statuses = []
+            min_risk = max_risk = None
+            if has_model_scores and transactions["risk_status"].notna().any():
+                st.caption("Risk score range (0–1)")
+                risk_min_col, risk_max_col = st.columns(2)
+                with risk_min_col:
+                    min_risk = st.number_input(
+                        "Risk min", value=None, placeholder="Min", label_visibility="collapsed",
+                        min_value=0.0, max_value=1.0, step=0.05, key="explorer_risk_min",
+                    )
+                with risk_max_col:
+                    max_risk = st.number_input(
+                        "Risk max", value=None, placeholder="Max", label_visibility="collapsed",
+                        min_value=0.0, max_value=1.0, step=0.05, key="explorer_risk_max",
+                    )
+                risk_statuses = st.multiselect(
+                    "Risk status",
+                    [v for v in ("High risk", "Review", "Low risk") if v in set(transactions["risk_status"])],
+                    key="explorer_filter_risk_status",
+                )
+        if has_model_scores:
+            geo_col, dev_col = st.columns(2)
+            with geo_col:
+                geography_filter = st.selectbox(
+                    "Geography", ["Any", "Match", "Mismatch"], key="explorer_geography_filter"
+                )
+            with dev_col:
+                device_filter = st.selectbox(
+                    "Device", ["Any", "Known", "New"], key="explorer_device_filter"
+                )
+        else:
+            geography_filter = device_filter = "Any"
+        st.write("")
+
     filtered = transactions.copy()
     if search:
         needle = search.casefold()
@@ -691,39 +876,101 @@ def render_transactions_view(transactions: pd.DataFrame, *, is_mock: bool) -> No
         filtered = filtered[filtered["method"].isin(methods)]
     if currencies:
         filtered = filtered[filtered["currency"].isin(currencies)]
+    if min_amount is not None:
+        filtered = filtered[filtered["amount"] >= min_amount]
+    if max_amount is not None:
+        filtered = filtered[filtered["amount"] <= max_amount]
+    if has_model_scores and min_risk is not None:
+        filtered = filtered[filtered["risk_score"] >= min_risk]
+    if has_model_scores and max_risk is not None:
+        filtered = filtered[filtered["risk_score"] <= max_risk]
     if risk_statuses:
         filtered = filtered[filtered["risk_status"].isin(risk_statuses)]
     if international_only:
         filtered = filtered[filtered["international"]]
-    if is_mock and geography_filter != "Any":
+    if has_model_scores and geography_filter != "Any":
         filtered = filtered[filtered["ip_billing_mismatch"].eq(geography_filter == "Mismatch")]
-    if is_mock and device_filter != "Any":
+    if has_model_scores and device_filter != "Any":
         filtered = filtered[filtered["new_device"].eq(device_filter == "New")]
-    captured = filtered[filtered["status"].eq("captured")]
-    captured_values = captured.groupby("currency")["amount"].sum().to_dict()
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Transactions", f"{len(filtered):,}")
-    m2.metric("Captured", f"{len(captured):,}")
-    m3.metric("Failed", f"{filtered['status'].eq('failed').sum():,}")
-    m4.metric("Captured value", format_currency_costs(captured_values))
-    loaded_range = st.session_state.get("razorpay_loaded_range")
-    if loaded_range:
-        st.caption(
-            f"Showing {len(filtered):,} of {len(transactions):,} transactions · "
-            f"{loaded_range[0]:%d %b %Y} – {loaded_range[1]:%d %b %Y} UTC"
+
+    _render_csv_batch_tester()
+
+    if has_model_scores:
+        _render_fraud_parameters_panel(
+            filtered,
+            signal_importance=(upload_result or {}).get("signal_importance_percent")
+            if using_upload else None,
         )
-    if is_mock:
-        displayed = pd.DataFrame({
-            "Txn": filtered["payment_id"],
-            "Amount": filtered.apply(lambda row: f"{row['currency']} {row['amount']:,.2f}", axis=1),
-            "Method": filtered["method"].str.title(),
-            "Velocity": filtered["velocity"].map(lambda value: f"{int(value)}/hr"),
-            "IP/Billing": filtered["ip_billing_mismatch"].map({True: "Mismatch", False: "Match"}),
-            "Device": filtered["new_device"].map({True: "New", False: "Known"}),
-            "Score": filtered["risk_score"].astype(float),
-            "Risk": filtered["risk_status"],
-            "Payment status": filtered["status"].str.title(),
-        })
+    else:
+        st.caption("Fraud detection parameters are available in the synthetic demo.")
+
+    total_values = filtered.groupby("currency")["amount"].sum().to_dict()
+    avg_currency = filtered["currency"].mode().iat[0] if filtered["currency"].notna().any() else ""
+    avg_amount = filtered["amount"].mean() if len(filtered) else 0.0
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric(":material/database: Total transactions", f"{len(filtered):,}")
+    if has_model_scores:
+        flagged = int(filtered["risk_status"].eq("High risk").sum())
+        flagged_pct = (flagged / len(filtered) * 100) if len(filtered) else 0.0
+        m2.metric(
+            ":material/warning: Flagged transactions", f"{flagged:,}",
+            delta=f"{flagged_pct:.1f}%", delta_color="inverse",
+        )
+    else:
+        m2.metric(":material/check_circle: Captured", f"{filtered['status'].eq('captured').sum():,}")
+    m3.metric(":material/payments: Total transaction amount", format_currency_costs(total_values))
+    m4.metric(
+        ":material/bar_chart: Avg. transaction amount",
+        format_currency_costs({avg_currency: avg_amount}) if avg_currency else "₹0.00",
+    )
+    st.caption(f"Showing {len(filtered):,} of {len(transactions):,} loaded transactions.")
+
+    st.markdown(f"#### Transactions ({len(filtered):,})")
+    if has_model_scores:
+        if using_upload:
+            displayed = pd.DataFrame({
+                "Transaction ID": filtered["payment_id"],
+                "Date & Time": filtered["created_at"].dt.strftime("%d %b %Y, %I:%M %p"),
+                "User": filtered["email"].where(filtered["email"].ne(""), filtered["contact"]),
+                "Amount": filtered.apply(lambda row: f"{row['currency']} {row['amount']:,.2f}", axis=1),
+                "Method": filtered["method"].str.title(),
+                "Velocity/hr": pd.to_numeric(filtered["velocity"], errors="coerce").round(2),
+                "Geo mismatch": filtered["ip_billing_mismatch"].map({1.0: "Mismatch", 0.0: "Match", True: "Mismatch", False: "Match"}).fillna("Unknown"),
+                "Risk score": (filtered["risk_score"] * 100).round().astype("Int64"),
+                "Status": filtered["risk_status"].map(RISK_STATUS_PILL_LABELS),
+                "Reasons": filtered["reasons"].map(
+                    lambda items: "; ".join(items) if isinstance(items, list) else str(items)
+                ),
+            })
+        else:
+            displayed = pd.DataFrame({
+                "Transaction ID": filtered["payment_id"],
+                "Date & Time": filtered["created_at"].dt.strftime("%d %b %Y, %I:%M %p"),
+                "Customer": filtered["email"].where(filtered["email"].ne(""), filtered["contact"]),
+                "Amount": filtered.apply(lambda row: f"{row['currency']} {row['amount']:,.2f}", axis=1),
+                "Payment method": filtered["method"].str.title(),
+                "Risk score": (filtered["risk_score"] * 100).round().astype("Int64"),
+                "Status": filtered["risk_status"].map(RISK_STATUS_PILL_LABELS),
+                "Payment status": filtered["status"].str.title(),
+            })
+
+        def _style_row(row: pd.Series) -> list[str]:
+            color, bg = PILL_COLORS.get(row["Status"], ("#5c6472", "#f0f2f5"))
+            styles = []
+            for column in row.index:
+                if column == "Risk score":
+                    styles.append(f"color:{color}; font-weight:700;")
+                elif column == "Status":
+                    styles.append(
+                        f"color:{color}; background-color:{bg}; border-radius:999px; "
+                        "font-weight:600; text-align:center;"
+                    )
+                else:
+                    styles.append("")
+            return styles
+
+        styled = displayed.style.apply(_style_row, axis=1)
+        st.dataframe(styled, use_container_width=True, hide_index=True, height=470)
     else:
         st.info(
             "Razorpay does not supply device history, IP comparison, velocity, or fraud labels, "
@@ -733,21 +980,47 @@ def render_transactions_view(transactions: pd.DataFrame, *, is_mock: bool) -> No
             "payment_id", "created_at", "amount", "currency", "status", "method",
             "order_id", "email", "contact",
         ]]
-    st.dataframe(
-        displayed, use_container_width=True, hide_index=True, height=470,
-        column_config={"Score": st.column_config.ProgressColumn(
-            "Risk score", min_value=0.0, max_value=1.0, format="%.3f"
-        )},
-    )
+        st.dataframe(displayed, use_container_width=True, hide_index=True, height=470)
+
     st.download_button(
         "Download filtered transactions", csv_injection_safe(displayed).to_csv(index=False),
-        "razorpay_transactions.csv", mime="text/csv",
+        "razorpay_transactions.csv", mime="text/csv", key="explorer_download_filtered",
     )
-    if is_mock and filtered["risk_score"].ge(DEMO_BLOCKING_THRESHOLD).any():
-        st.caption(
-            "High-risk rows here can be opened in **Transaction investigation** for the full "
-            "signal breakdown, AI evidence report, and case actions."
-        )
+    if is_mock and not using_upload and len(filtered):
+        jump_col, action_col = st.columns([3, 1], vertical_alignment="bottom")
+        with jump_col:
+            jump_to = st.selectbox(
+                "Open a transaction in Transaction investigation",
+                filtered["payment_id"].tolist(), key="explorer_jump_to",
+            )
+        with action_col:
+            st.button(
+                "Open →", type="primary", use_container_width=True, key="explorer_jump_button",
+                on_click=_open_demo_view, args=("Transaction investigation", jump_to),
+            )
+    elif using_upload and len(filtered):
+        jump_col, action_col = st.columns([3, 1], vertical_alignment="bottom")
+        with jump_col:
+            jump_to = st.selectbox(
+                "Open an uploaded transaction in Transaction investigation",
+                filtered["payment_id"].tolist(), key="explorer_upload_jump_to",
+            )
+        with action_col:
+            st.button(
+                "Open →", type="primary", use_container_width=True, key="explorer_upload_jump_button",
+                on_click=_open_demo_view, args=("Transaction investigation", jump_to),
+            )
+
+
+def active_transaction_dataset(transactions: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
+    """Return the uploaded scored dataset when it is the active review source."""
+    upload_result = st.session_state.get("csv_tester_results")
+    if upload_result and st.session_state.get("csv_tester_active"):
+        return uploaded_scores_to_dashboard_transactions(
+            upload_result["scored"],
+            review_threshold=float(upload_result.get("decision_threshold") or DEMO_REVIEW_THRESHOLD),
+        ), True
+    return transactions, False
 
 
 def render_global_importance() -> None:
@@ -770,7 +1043,7 @@ def render_global_importance() -> None:
 def render_model_transparency_section(transactions: pd.DataFrame) -> None:
     """The trained model's held-out performance, cost explorer, and global importance.
 
-    Embedded in Fraud overview rather than its own nav item: this is real,
+    Embedded in Overview rather than its own nav item: this is real,
     static model evaluation content, not something that needs a page of its own.
     """
     st.divider()
@@ -833,86 +1106,339 @@ def render_model_transparency_section(transactions: pd.DataFrame) -> None:
         )
 
 
-def render_fraud_overview(transactions: pd.DataFrame) -> None:
-    """KPIs, a risk trend, and the top open alerts across the loaded window."""
-    render_page_header(
-        "Fraud overview", "Portfolio-level risk posture across the loaded synthetic transactions."
-    )
-    if transactions.empty:
-        st.info("No transactions are loaded for the selected date range.")
-        return
-    if transactions["risk_score"].notna().any():
-        total = len(transactions)
-        fraud = int(transactions["actual"].eq("Fraud").sum())
-        flagged = int(transactions["risk_status"].eq("High risk").sum())
-        o1, o2, o3, o4 = st.columns(4)
-        o1.metric("Total transactions", f"{total:,}")
-        o2.metric("Labelled fraud (synthetic)", f"{fraud:,}")
-        o3.metric("Labelled legitimate", f"{total - fraud:,}")
-        o4.metric("Flagged high risk", f"{flagged:,}")
-        st.caption(
-            "Fraud/legitimate labels are synthetic ground truth revealed only to evaluate the demo; "
-            "they are not real Razorpay findings."
-        )
-
-        st.markdown("### Risk trend")
-        trend = (
-            transactions.sort_values("created_at")
-            .set_index("created_at")["risk_score"]
-            .rolling(5, min_periods=1).mean()
-        )
-        st.line_chart(trend, height=220)
-        st.caption("5-transaction rolling average risk score over the loaded window.")
-
-        st.markdown("### Top alerts")
-        top_alerts = transactions.sort_values("risk_score", ascending=False).head(5)
-        for _, row in top_alerts.iterrows():
-            left, right = st.columns([5, 1.4], vertical_alignment="center")
-            with left:
-                st.markdown(
-                    f"**{row['payment_id']}** · score **{row['risk_score']:.3f}** "
-                    f"({row['risk_status']})  \n{' · '.join(_signal_reasons(row))}"
-                )
-            with right:
-                st.button(
-                    "Investigate →", key=f"overview_investigate_{row['payment_id']}",
-                    use_container_width=True, on_click=_open_demo_view,
-                    args=("Transaction investigation", str(row["payment_id"])),
-                )
-    else:
-        st.info(
-            "Fraud overview needs scored transactions. Real Razorpay payments have no FraudLens "
-            "score because the Payments API does not supply the required signals."
-        )
-    render_model_transparency_section(transactions)
+def _render_overview_steps(transactions: pd.DataFrame) -> None:
+    """The Input → Detect → Results → Action pipeline, backed by the loaded window's real counts."""
+    total = len(transactions)
+    flagged = int(transactions["risk_status"].eq("High risk").sum())
     st.markdown(
-        '<div class="defense-banner">Defense-only: this view explains and prioritizes existing '
-        'signals for human review. It never automatically captures or refunds a payment.</div>',
+        f"""
+        <div class="workflow workflow-four">
+          <div class="workflow-step">
+            <div class="workflow-number">STEP 1</div>
+            <div class="workflow-title">Input data</div>
+            <p>{total:,} transactions loaded for the selected window.</p>
+          </div>
+          <div class="workflow-step">
+            <div class="workflow-number">STEP 2</div>
+            <div class="workflow-title">Detect spikes</div>
+            <p>FraudLens scores every transaction with statistical and ML signals.</p>
+          </div>
+          <div class="workflow-step">
+            <div class="workflow-number">STEP 3</div>
+            <div class="workflow-title">View results</div>
+            <p>Fraud trend, spike alerts, and the high-risk queue, below.</p>
+          </div>
+          <div class="workflow-step">
+            <div class="workflow-number">STEP 4</div>
+            <div class="workflow-title">Take action</div>
+            <p>{flagged:,} transactions flagged high risk—investigate or decide now.</p>
+          </div>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
 
-def render_fraud_alerts(transactions: pd.DataFrame) -> None:
-    """Prioritized review queue for every transaction above the review threshold."""
-    render_page_header(
-        "Fraud review queue",
-        "Start with high-priority transactions, inspect the evidence, and record a human decision.",
+def _overview_status_badge(score: float) -> tuple[str, str]:
+    if score >= DEMO_BLOCKING_THRESHOLD:
+        return "Flagged", "flagged"
+    if score >= DEMO_REVIEW_THRESHOLD:
+        return "Review", "review"
+    return "Clear", "clear"
+
+
+def _render_overview_infographic(transactions: pd.DataFrame, alerts: pd.DataFrame) -> None:
+    """A reference-style overview panel: process cards, spike trend, high-risk table, and callout."""
+    total = len(transactions)
+    flagged = int(transactions["risk_status"].eq("High risk").sum())
+    dated = transactions.assign(day=pd.to_datetime(transactions["created_at"], utc=True).dt.floor("D"))
+    daily = dated.groupby("day").agg(
+        total=("payment_id", "count"),
+        flagged=("risk_status", lambda status: status.eq("High risk").sum()),
     )
-    if transactions.empty:
-        st.info("No transactions are loaded for the selected date range.")
-        return
-    if not transactions["risk_score"].notna().any():
-        st.info(
-            "Alerts need scored transactions. Real Razorpay payments have no FraudLens score because "
-            "the Payments API does not supply the required signals."
+    if daily.empty:
+        daily = pd.DataFrame({"total": [0], "flagged": [0]}, index=[pd.Timestamp.utcnow().floor("D")])
+    full_index = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
+    if len(full_index) > 7:
+        full_index = full_index[-7:]
+    daily = daily.reindex(full_index, fill_value=0)
+    total_points = daily["total"].astype(float).tolist()
+    flagged_points = daily["flagged"].astype(float).tolist()
+    labels = [pd.Timestamp(day).strftime("%b %d") for day in daily.index]
+
+    def points(values: list[float], *, height: int = 210, width: int = 430) -> str:
+        if not values:
+            return ""
+        max_value = max(max(total_points or [1]), max(flagged_points or [1]), 1)
+        step = width / max(len(values) - 1, 1)
+        coords = []
+        for index, value in enumerate(values):
+            x = 16 + index * step
+            y = 18 + (height - 36) * (1 - (value / max_value))
+            coords.append(f"{x:.1f},{y:.1f}")
+        return " ".join(coords)
+
+    latest_day = pd.Timestamp(daily.index[-1]).strftime("%b %d, %Y")
+    previous_flagged = daily["flagged"].iloc[:-1]
+    previous_average = float(previous_flagged.mean()) if len(previous_flagged) else 0.0
+    latest_flagged = float(daily["flagged"].iloc[-1])
+    if previous_average > 0:
+        increase = int(round(((latest_flagged - previous_average) / previous_average) * 100))
+    else:
+        increase = 100 if latest_flagged > 0 else 0
+    increase_label = f"{increase:+d}%"
+    spike_title = "Fraud Spike Detected!" if increase > 0 else "Fraud Trend Stable"
+    spike_copy = (
+        "There is a significant increase in fraudulent transactions compared to the usual pattern."
+        if increase > 0
+        else "The latest uploaded transactions do not show an increase over the previous daily pattern."
+    )
+    spike_label_x = 352
+    spike_label_y = 42
+
+    table_rows = []
+    high_risk_rows = alerts.sort_values(
+        ["risk_score", "created_at"], ascending=[False, False], na_position="last"
+    ).head(5)
+    for _, row in high_risk_rows.iterrows():
+        txn_id = str(row["payment_id"])
+        created_at = pd.Timestamp(row["created_at"]).strftime("%b %d, %H:%M")
+        amount_label = f"{float(row['amount']):,.0f}"
+        score = int(round(float(row["risk_score"]) * 100))
+        status_label = "Flagged" if str(row.get("risk_status")) == "High risk" else "Review"
+        status_class = "flagged" if status_label == "Flagged" else "review"
+        table_rows.append(
+            f"""
+            <tr>
+              <td>{escape(txn_id)}</td>
+              <td>{escape(created_at)}</td>
+              <td>{escape(amount_label)}</td>
+              <td>{score}</td>
+              <td><span class="overview-status overview-status-{status_class}">{status_label}</span></td>
+            </tr>
+            """
         )
-        return
-    alerts = transactions[transactions["risk_score"].ge(DEMO_REVIEW_THRESHOLD)].sort_values(
-        ["risk_score", "created_at"], ascending=[False, False]
+    rows_html = "".join(table_rows) or (
+        '<tr><td colspan="5">No uploaded transactions are above the review threshold.</td></tr>'
     )
+    x_labels = "".join(
+        f'<span style="left:{(index / max(len(labels) - 1, 1)) * 100:.1f}%">{escape(label)}</span>'
+        for index, label in enumerate(labels)
+    )
+
+    overview_css = (PROJECT_ROOT / "frontend" / "redesign.css").read_text()
+    components.html(
+        dedent(f"""
+        <style>
+        {overview_css}
+        html,
+        body {{
+          margin: 0;
+          background: #ffffff;
+        }}
+        .overview-reference {{
+          margin: 0;
+          padding: 0;
+        }}
+        </style>
+        <section class="overview-reference">
+          <div class="overview-hero">
+            <div>
+              <h1>Fraud Spike Detection</h1>
+              <p>Identify unusual spikes in fraudulent transactions and take action early.</p>
+            </div>
+            <div class="overview-hero-pill">
+              <span class="overview-shield">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.4 19.5 5.2v5.7c0 4.9-3 8.9-7.5 10.7-4.5-1.8-7.5-5.8-7.5-10.7V5.2L12 2.4Z"/><path d="M12 6.2v11.1c2.6-1.3 4.2-3.7 4.2-6.5V7.4L12 6.2Z"/></svg>
+              </span>
+              <div><strong>Detect <b>•</b> Analyze <b>•</b> Prevent</strong><span>Safer transactions. A more secure tomorrow.</span></div>
+            </div>
+          </div>
+
+          <div class="overview-flow">
+            <div class="overview-step-card">
+              <div class="overview-step-head"><span>1</span><strong>Input Data</strong></div>
+              <p>Upload or connect your transaction data.</p>
+              <div class="overview-upload">
+                <span class="overview-symbol">upload</span>
+                <em>Drag & drop your file here<br>or</em>
+                <button>Choose File</button>
+              </div>
+              <small>Supported formats: CSV, Excel</small>
+            </div>
+            <div class="overview-arrow">→</div>
+            <div class="overview-step-card">
+              <div class="overview-step-head"><span>2</span><strong>Detect Spikes</strong></div>
+              <p>We analyze transaction patterns to find unusual spikes in fraud.</p>
+              <div class="overview-icon-circle"><span class="overview-symbol">search</span></div>
+              <ul><li>Monitor transaction volume</li><li>Identify abnormal patterns</li><li>Use statistical & ML models</li></ul>
+            </div>
+            <div class="overview-arrow">→</div>
+            <div class="overview-step-card">
+              <div class="overview-step-head"><span>3</span><strong>View Results</strong></div>
+              <p>See detected spikes and high-risk transactions.</p>
+              <div class="overview-icon-circle"><span class="overview-symbol">bar_chart</span></div>
+              <ul><li>Time-wise fraud trend</li><li>Spike alerts</li><li>High-risk transactions list</li></ul>
+            </div>
+            <div class="overview-arrow">→</div>
+            <div class="overview-step-card">
+              <div class="overview-step-head"><span>4</span><strong>Take Action</strong></div>
+              <p>Review and act on the detected fraud.</p>
+              <div class="overview-icon-circle"><span class="overview-symbol">settings</span></div>
+              <ul><li>Investigate suspicious activity</li><li>Block or flag transactions</li><li>Export report</li></ul>
+            </div>
+          </div>
+
+          <div class="overview-analytics-row">
+            <div class="overview-panel overview-trend-panel">
+              <h2>Transaction Trend</h2>
+              <div class="overview-legend"><span><i class="dot-muted"></i>Total Transactions</span><span><i></i>Fraudulent Transactions</span></div>
+              <div class="overview-chart">
+                <svg viewBox="0 0 470 245" preserveAspectRatio="none" aria-hidden="true">
+                  <g class="overview-grid">
+                    <path d="M36 28H450M36 76H450M36 124H450M36 172H450M36 220H450"/>
+                    <path d="M36 28V220M105 28V220M174 28V220M243 28V220M312 28V220M381 28V220M450 28V220"/>
+                  </g>
+                  <polyline class="overview-line-muted" points="{points(total_points)}"/>
+                  <polyline class="overview-line-blue" points="{points(flagged_points)}"/>
+                  <circle class="overview-dot-blue" cx="446" cy="47" r="6"/>
+                  <path class="overview-spike-arrow" d="M446 13v26m0 0-8-8m8 8 8-8"/>
+                </svg>
+                <div class="overview-spike-chip" style="left:{spike_label_x}px;top:{spike_label_y}px">Spike Detected</div>
+                <div class="overview-axis-labels">{x_labels}</div>
+              </div>
+            </div>
+
+            <div class="overview-panel overview-risk-table">
+              <div class="overview-table-head"><h2>High-Risk Transactions</h2><span>View All</span></div>
+              <table>
+                <thead><tr><th>Transaction ID</th><th>Date & Time</th><th>Amount</th><th>Risk Score</th><th>Status</th></tr></thead>
+                <tbody>{rows_html}</tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="overview-spike-callout">
+            <div class="overview-callout-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.4 19.5 5.2v5.7c0 4.9-3 8.9-7.5 10.7-4.5-1.8-7.5-5.8-7.5-10.7V5.2L12 2.4Z"/><path d="M12 6.2v11.1c2.6-1.3 4.2-3.7 4.2-6.5V7.4L12 6.2Z"/></svg></div>
+            <div class="overview-callout-copy"><h2>{escape(spike_title)}</h2><p>{escape(spike_copy)}</p></div>
+            <div class="overview-callout-meta"><span>Spike Time</span><strong>{escape(latest_day)}, 10:00 - 12:00</strong></div>
+            <div class="overview-callout-meta"><span>Increase</span><strong class="overview-increase">{escape(increase_label)}</strong></div>
+            <button class="overview-investigate">Investigate Now</button>
+          </div>
+
+          <div class="overview-footer"><span>Fraud detection today. A safer tomorrow.</span><span>Secure <b>•</b> Reliable <b>•</b> Intelligent</span></div>
+        </section>
+        """),
+        height=1190,
+        scrolling=False,
+    )
+
+
+def _render_overview_trend_chart(transactions: pd.DataFrame) -> None:
+    st.markdown("#### Transaction trend")
+    daily = transactions.assign(day=transactions["created_at"].dt.floor("D"))
+    trend = daily.groupby("day").agg(
+        **{
+            "Total transactions": ("payment_id", "count"),
+            "Flagged high risk": ("risk_status", lambda status: status.eq("High risk").sum()),
+        }
+    )
+    st.line_chart(trend, height=280)
+    st.caption("Daily transaction volume vs. transactions flagged high risk in the loaded window.")
+
+
+def _render_overview_high_risk_panel(alerts: pd.DataFrame) -> None:
+    st.markdown("#### High-risk transactions")
     if alerts.empty:
         st.success("No transactions are at or above the review threshold in this window.")
         return
+    reviewer = st.text_input(
+        "Reviewer identity",
+        placeholder="Name or work email",
+        key="overview_reviewer_identity",
+    )
+    for _, row in alerts.head(5).iterrows():
+        payment_id = str(row["payment_id"])
+        score = float(row["risk_score"])
+        is_high = score >= DEMO_BLOCKING_THRESHOLD
+        status_label = "Flagged" if is_high else "Review"
+        status_class = "high" if is_high else "review"
+        created_at = pd.Timestamp(row["created_at"])
+        with st.container(border=True):
+            st.markdown(
+                f'<span class="alert-card-anchor alert-card-{status_class}"></span>'
+                f"""
+                <div class="alert-card-header">
+                  <span class="alert-priority alert-priority-{status_class}">{status_label}</span>
+                  <span class="alert-risk-score"><strong>{score:.0%}</strong> risk score</span>
+                </div>
+                <div class="alert-payment-line">
+                  <strong>{escape(str(row['currency']))} {float(row['amount']):,.2f}</strong>
+                  <span>{escape(payment_id)}</span>
+                </div>
+                <div class="alert-payment-meta">{created_at:%d %b %Y, %H:%M UTC}</div>
+                """,
+                unsafe_allow_html=True,
+            )
+            legit_col, fraud_col, investigate_col = st.columns(3)
+            with legit_col:
+                mark_legit = st.button(
+                    "Mark legitimate", key=f"overview_legit_{payment_id}", use_container_width=True
+                )
+            with fraud_col:
+                mark_fraud = st.button(
+                    "Confirm fraud", key=f"overview_fraud_{payment_id}", use_container_width=True
+                )
+            with investigate_col:
+                st.button(
+                    "Investigate →", key=f"overview_investigate_{payment_id}",
+                    type="primary", use_container_width=True, on_click=_open_demo_view,
+                    args=("Transaction investigation", payment_id),
+                )
+            if mark_legit or mark_fraud:
+                try:
+                    set_fraud_case_status(
+                        payment_id,
+                        "false_positive" if mark_legit else "confirmed_fraud",
+                        SCORING_API_URL,
+                        actor=reviewer,
+                        risk_score=score,
+                    )
+                    st.success("Case updated.")
+                    st.rerun()
+                except ScoringAPIError as exc:
+                    st.error(str(exc))
+    if len(alerts) > 5:
+        st.caption(f"Showing the top 5 of {len(alerts):,} flagged transactions—see all below.")
+
+
+def _render_overview_spike_banner(transactions: pd.DataFrame) -> None:
+    daily_flagged = (
+        transactions.assign(day=transactions["created_at"].dt.floor("D"))
+        .groupby("day")["risk_status"].apply(lambda status: status.eq("High risk").sum())
+        .sort_index()
+    )
+    if len(daily_flagged) < 2:
+        return
+    latest_day, latest = daily_flagged.index[-1], daily_flagged.iloc[-1]
+    baseline = daily_flagged.iloc[:-1].mean()
+    if baseline <= 0 or latest <= baseline * 1.5:
+        return
+    increase = (latest / baseline - 1) * 100
+    st.markdown(
+        f"""
+        <div class="spike-banner">
+          <div><strong>Fraud spike detected!</strong><br>
+          Transactions flagged high risk on {latest_day:%d %b %Y} are {increase:.0f}% above the
+          window's daily average—see the high-risk queue above.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_alert_queue(alerts: pd.DataFrame) -> None:
+    """The full, filterable list of every transaction at or above the review threshold."""
     high_priority = alerts["risk_score"].ge(DEMO_BLOCKING_THRESHOLD)
     high_count = int(high_priority.sum())
     review_count = len(alerts) - high_count
@@ -1007,19 +1533,79 @@ def render_fraud_alerts(transactions: pd.DataFrame) -> None:
                 )
 
 
+def render_overview(transactions: pd.DataFrame, *, connection: dict, is_mock_session: bool) -> None:
+    """Reference-style fraud spike overview."""
+    transactions, using_upload = active_transaction_dataset(transactions)
+    if transactions.empty:
+        render_page_header(
+            "Fraud overview",
+            "Detect unusual spikes, review flagged transactions, and act on them-all in one place.",
+        )
+        st.info("No transactions are loaded for the selected date range.")
+    elif not transactions["risk_score"].notna().any():
+        render_page_header(
+            "Fraud overview",
+            "Detect unusual spikes, review flagged transactions, and act on them-all in one place.",
+        )
+        st.info(
+            "Fraud overview needs scored transactions. Real Razorpay payments have no FraudLens "
+            "score because the Payments API does not supply the required signals."
+        )
+    else:
+        if using_upload:
+            st.info("Overview is using the uploaded CSV scored by the backend model.")
+        alerts = transactions[transactions["risk_score"].ge(DEMO_REVIEW_THRESHOLD)].sort_values(
+            ["risk_score", "created_at"], ascending=[False, False]
+        )
+        _render_overview_infographic(transactions, alerts)
+
+
 def _render_transaction_chat(row: pd.Series) -> None:
-    st.markdown("### Ask AI about this transaction")
     payment_id = str(row["payment_id"])
     chats = st.session_state.setdefault("razorpay_transaction_chats", {})
     history = chats.setdefault(payment_id, [])
-    for message in history:
-        with st.chat_message(message["role"]):
-            st.write(message["content"])
-    question = st.chat_input(f"Ask about {payment_id}", key="investigation_question")
-    if not question:
+    with st.container(height=420, border=True):
+        if not history:
+            st.caption("Ask why this transaction was flagged, summarize its risk factors, or request next steps.")
+        for message in history:
+            with st.chat_message(message["role"]):
+                st.write(message["content"])
+
+    question_col, send_col = st.columns([5, 1], vertical_alignment="bottom")
+    with question_col:
+        typed_question = st.text_input(
+            "Ask about this transaction",
+            key=f"investigation_question_{payment_id}",
+            placeholder="Ask anything about this transaction…",
+            label_visibility="collapsed",
+        )
+    with send_col:
+        send_clicked = st.button(
+            "Send question", key=f"investigation_send_{payment_id}", use_container_width=True
+        )
+    suggestions = (
+        "Summarize risk factors",
+        "Is this customer genuine?",
+        "What should I do next?",
+    )
+    suggestion_columns = st.columns(3)
+    selected_question = typed_question.strip() if send_clicked else ""
+    for column, suggestion in zip(suggestion_columns, suggestions):
+        with column:
+            if st.button(
+                suggestion,
+                key=f"investigation_suggestion_{payment_id}_{suggestion}",
+                use_container_width=True,
+            ):
+                selected_question = suggestion
+    if send_clicked and not selected_question:
+        st.warning("Enter a question before sending.")
         return
+    if not selected_question:
+        return
+
     prior = history[-8:]
-    history.append({"role": "user", "content": question})
+    history.append({"role": "user", "content": selected_question})
     context = {
         "payment_id": payment_id, "transaction_id": payment_id,
         "timestamp": row["created_at"].isoformat(), "amount": float(row["amount"]),
@@ -1027,16 +1613,23 @@ def _render_transaction_chat(row: pd.Series) -> None:
         "method": str(row["method"]), "order_id": str(row["order_id"]),
         "email": str(row["email"]), "contact": str(row["contact"]),
         "international": bool(row["international"]),
-        "velocity": None if pd.isna(row["velocity"]) else int(row["velocity"]),
+        "velocity": None if pd.isna(row["velocity"]) else float(row["velocity"]),
         "ip_billing_mismatch": None if pd.isna(row["ip_billing_mismatch"]) else bool(row["ip_billing_mismatch"]),
         "new_device": None if pd.isna(row["new_device"]) else bool(row["new_device"]),
         "amount_deviation": None if pd.isna(row["amount_deviation"]) else float(row["amount_deviation"]),
         "risk_score": None if pd.isna(row["risk_score"]) else float(row["risk_score"]),
         "risk_status": None if pd.isna(row["risk_status"]) else str(row["risk_status"]),
         "actual": None if pd.isna(row["actual"]) else str(row["actual"]),
+        "reasons": row.get("reasons") if isinstance(row.get("reasons"), list) else [],
+        "review_threshold": float(
+            (st.session_state.get("csv_tester_results") or {}).get("decision_threshold")
+            or DEMO_REVIEW_THRESHOLD
+        ),
     }
     try:
-        response = ask_preview_transaction_question(context, question, prior, SCORING_API_URL)
+        response = ask_preview_transaction_question(
+            context, selected_question, prior, SCORING_API_URL
+        )
         answer = response["answer"] if response["status"] == "generated" else response.get("error", "Unable to answer.")
     except ScoringAPIError as exc:
         answer = str(exc)
@@ -1044,39 +1637,79 @@ def _render_transaction_chat(row: pd.Series) -> None:
     st.rerun()
 
 
-def _render_case_actions(row: pd.Series) -> None:
-    payment_id = str(row["payment_id"])
-    st.markdown("### Case status")
+def _step_investigation(options: list[str], delta: int) -> None:
+    current = st.session_state.get("investigation_payment_id")
+    if current in options:
+        index = options.index(current)
+        st.session_state["investigation_payment_id"] = options[max(0, min(len(options) - 1, index + delta))]
+
+
+def _fetch_case(payment_id: str) -> tuple[dict | None, list[dict]]:
     try:
         payload = get_fraud_case(payment_id, SCORING_API_URL)
-        case, notes = payload.get("case"), payload.get("notes") or []
+        return payload.get("case"), payload.get("notes") or []
     except ScoringAPIError as exc:
         st.warning(f"Case storage unavailable: {exc}")
-        case, notes = None, []
+        return None, []
+
+
+def _render_investigation_notes_panel(payment_id: str, notes: list[dict]) -> None:
+    st.markdown("### Investigation notes")
+    if not notes:
+        st.caption("No notes yet.")
+    else:
+        with st.container(height=220, border=False):
+            for note in notes:
+                st.markdown(
+                    f'<div class="investigation-note"><strong>{escape(note.get("author") or "Analyst")}</strong> '
+                    f'<span>{escape(str(note.get("created_at", "")))}</span>'
+                    f'<p>{escape(note["note"])}</p></div>',
+                    unsafe_allow_html=True,
+                )
+    note_text = st.text_area(
+        "Add a note", key=f"case_note_{payment_id}", placeholder="Investigation notes…",
+        label_visibility="collapsed",
+    )
+    if st.button("+ Add note", key=f"case_save_note_{payment_id}", use_container_width=True):
+        analyst = st.session_state.get("investigation_analyst_name", "")
+        if note_text.strip():
+            try:
+                add_fraud_case_note(payment_id, note_text, SCORING_API_URL, author=analyst)
+                st.success("Note saved.")
+                st.rerun()
+            except ScoringAPIError as exc:
+                st.error(str(exc))
+        else:
+            st.warning("Write a note before saving.")
+
+
+def _render_case_status_bar(row: pd.Series, case: dict | None) -> None:
+    payment_id = str(row["payment_id"])
     current_status = case["status"] if case else "open"
     updated_by = f" · last updated by {case['updated_by']}" if case and case.get("updated_by") else ""
-    st.caption(f"Current status: **{CASE_STATUS_LABELS.get(current_status, current_status)}**{updated_by}")
-
+    st.markdown(
+        f"Case status: **{CASE_STATUS_LABELS.get(current_status, current_status)}**{updated_by}"
+    )
     analyst = st.text_input(
         "Analyst name", key="investigation_analyst_name", placeholder="Name or work email"
     )
-    status_cols = st.columns(3)
-    with status_cols[0]:
-        mark_investigating = st.button(
-            "Mark under investigation", use_container_width=True, key=f"case_investigating_{payment_id}"
-        )
-    with status_cols[1]:
-        mark_fraud = st.button(
-            "Confirm fraud", use_container_width=True, key=f"case_fraud_{payment_id}"
-        )
-    with status_cols[2]:
+    legit_col, review_col, escalate_col = st.columns(3)
+    with legit_col:
         mark_false_positive = st.button(
-            "Mark false positive", use_container_width=True, key=f"case_fp_{payment_id}"
+            "Mark as legitimate", use_container_width=True, key=f"case_fp_{payment_id}"
+        )
+    with review_col:
+        mark_investigating = st.button(
+            "Keep under investigation", use_container_width=True, key=f"case_investigating_{payment_id}"
+        )
+    with escalate_col:
+        mark_fraud = st.button(
+            "Escalate: confirm fraud", type="primary", use_container_width=True, key=f"case_fraud_{payment_id}"
         )
     action = (
-        "under_investigation" if mark_investigating
+        "false_positive" if mark_false_positive
+        else "under_investigation" if mark_investigating
         else "confirmed_fraud" if mark_fraud
-        else "false_positive" if mark_false_positive
         else None
     )
     if action:
@@ -1088,30 +1721,15 @@ def _render_case_actions(row: pd.Series) -> None:
         except ScoringAPIError as exc:
             st.error(str(exc))
 
-    note_text = st.text_area("Add a note", key=f"case_note_{payment_id}", placeholder="Investigation notes…")
-    if st.button("Save note", key=f"case_save_note_{payment_id}"):
-        if note_text.strip():
-            try:
-                add_fraud_case_note(payment_id, note_text, SCORING_API_URL, author=analyst)
-                st.success("Note saved.")
-                st.rerun()
-            except ScoringAPIError as exc:
-                st.error(str(exc))
-        else:
-            st.warning("Write a note before saving.")
-
-    if notes:
-        st.markdown("#### Notes")
-        for note in notes:
-            st.markdown(f"**{note.get('author') or 'Analyst'}** · {note.get('created_at', '')}  \n{note['note']}")
-
 
 def render_transaction_investigation(transactions: pd.DataFrame, *, is_mock: bool) -> None:
     """Full signal detail, the AI evidence report, grounded chat, and case actions for one transaction."""
+    st.markdown('<span class="investigation-reference-active"></span>', unsafe_allow_html=True)
     render_page_header(
         "Transaction investigation",
-        "Full signal detail, the AI evidence report, grounded chat, and case actions for one transaction.",
+        "Review transaction details, analyze risk factors, and take appropriate action.",
     )
+    transactions, using_upload = active_transaction_dataset(transactions)
     if transactions.empty:
         st.info("No transactions are loaded for the selected date range.")
         return
@@ -1120,163 +1738,446 @@ def render_transaction_investigation(transactions: pd.DataFrame, *, is_mock: boo
     )["payment_id"].astype(str).tolist()
     if st.session_state.get("investigation_payment_id") not in options:
         st.session_state["investigation_payment_id"] = options[0]
-    payment_id = st.selectbox("Transaction", options, key="investigation_payment_id")
+    current_index = options.index(st.session_state["investigation_payment_id"])
+    payment_id = st.session_state["investigation_payment_id"]
     row = transactions.loc[transactions["payment_id"].astype(str).eq(payment_id)].iloc[0]
+    scored = not pd.isna(row["risk_score"])
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Risk score", "n/a" if pd.isna(row["risk_score"]) else f"{float(row['risk_score']):.3f}")
-    m2.metric("Risk status", "n/a" if pd.isna(row["risk_status"]) else str(row["risk_status"]))
-    m3.metric("Payment status", str(row["status"]).title())
-    st.caption(
-        f"{row['currency']} {row['amount']:,.2f} · {row['method'].title()} · "
-        f"{row['created_at']:%d %b %Y, %H:%M UTC}"
+    if scored:
+        status_label = str(row["risk_status"])
+        badge_class = "high" if status_label == "High risk" else "review" if status_label == "Review" else "safe"
+        badge_html = f'<span class="alert-priority alert-priority-{badge_class}">{escape(status_label)}</span>'
+    else:
+        badge_html = ""
+    amount_label = f"{escape(str(row['currency']))} {float(row['amount']):,.2f}"
+    score_label = f"{float(row['risk_score']) * 100:.0f} / 100" if scored else "N/A"
+    status_chip = escape(str(row["risk_status"] if scored else row["status"]).replace("_", " ").title())
+    method_label = str(row["method"]).title()
+    customer_label = str(row["email"]) or str(row["contact"]) or "Customer"
+    detail_pairs = [
+        ("Transaction ID", payment_id),
+        ("Date & Time", f"{row['created_at']:%b %d, %Y, %I:%M %p}"),
+        ("Payment Method", method_label),
+        ("Order ID", str(row.get("order_id") or "Not available")),
+        ("Customer", customer_label),
+        ("Currency", str(row["currency"])),
+        ("International", "Yes" if bool(row["international"]) else "No"),
+        (
+            "Location comparison",
+            "Not available" if pd.isna(row["ip_billing_mismatch"])
+            else "Mismatch" if bool(row["ip_billing_mismatch"]) else "Match",
+        ),
+        (
+            "Device history",
+            "Not available" if pd.isna(row["new_device"])
+            else "New device" if bool(row["new_device"]) else "Known device",
+        ),
+        ("Recent velocity", "Not available" if pd.isna(row["velocity"]) else f"{float(row['velocity']):.1f}/hr"),
+        (
+            "Amount deviation",
+            "Not available" if pd.isna(row["amount_deviation"])
+            else f"{float(row['amount_deviation']):+.0f}% vs. baseline",
+        ),
+        ("Payment Status", str(row["status"]).replace("_", " ").title()),
+        ("Transaction Status", status_chip),
+        ("Risk Score", score_label),
+    ]
+    details_html = "".join(
+        f'<div><span>{escape(label)}</span><strong>{escape(str(value))}</strong></div>'
+        for label, value in detail_pairs
+    )
+    severity_badge = {"high": "High", "medium": "Medium", "low": "Low"}
+    risk_cards = []
+    if scored and not any(pd.isna(row[field]) for field in (
+        "velocity", "ip_billing_mismatch", "new_device", "amount_deviation"
+    )):
+        risk_cards = [
+            (card["icon"], card["title"], card["detail"], card["severity"])
+            for card in _risk_indicator_cards(row)
+        ]
+    cards_html = "".join(
+        f"""
+        <div class="ti-risk-card ti-risk-{severity}">
+          <span class="material-symbols-rounded">{icon}</span>
+          <strong>{title}</strong>
+          <p>{detail}</p>
+          <em>{severity_badge[severity]}</em>
+        </div>
+        """
+        for icon, title, detail, severity in risk_cards
+    ) or '<p class="ti-empty-state">No model risk indicators are available for this transaction.</p>'
+    related = transactions.loc[
+        ~transactions["payment_id"].astype(str).eq(payment_id)
+    ].sort_values(["risk_score", "created_at"], ascending=[False, False], na_position="last").head(4)
+    related_rows = []
+    for _, item in related.iterrows():
+        related_score = "N/A" if pd.isna(item["risk_score"]) else f"{float(item['risk_score']) * 100:.0f}"
+        related_status = str(item.get("risk_status") or item["status"]).replace("_", " ").title()
+        related_pill = "review" if str(item.get("risk_status")) == "Review" else "flagged"
+        related_rows.append(f"""
+        <tr>
+          <td>{escape(str(item['payment_id']))}</td>
+          <td>{item['created_at']:%b %d, %I:%M %p}</td>
+          <td>{escape(str(item['currency']))} {float(item['amount']):,.2f}</td>
+          <td>{escape(str(item['method']).title())}</td>
+          <td>{related_score}</td>
+          <td><span class="ti-table-pill {related_pill}">{escape(related_status)}</span></td>
+        </tr>
+        """)
+    related_html = "".join(related_rows)
+    back_col, nav_spacer, previous_col, next_col = st.columns(
+        [2.4, 4, 1.5, 1.5], vertical_alignment="center"
+    )
+    with back_col:
+        st.button(
+            "← Back to alerts", key="investigation_back", on_click=_open_demo_view,
+            args=("Overview",), use_container_width=True,
+        )
+    with previous_col:
+        st.button(
+            "Previous transaction", key="investigation_previous", disabled=current_index == 0,
+            on_click=_step_investigation, args=(options, -1), use_container_width=True,
+        )
+    with next_col:
+        st.button(
+            "Next transaction", key="investigation_next", disabled=current_index == len(options) - 1,
+            on_click=_step_investigation, args=(options, 1), use_container_width=True,
+        )
+
+    main_col, assistant_col = st.columns([1.42, 1], gap="large", vertical_alignment="top")
+    with main_col:
+        st.markdown(
+            f"""
+        <div class="ti-shell">
+          <div class="ti-main-stack">
+            <main>
+              <section class="ti-hero">
+                <div class="ti-icon"><span class="material-symbols-rounded">credit_card</span></div>
+                <div>
+                  <span>Transaction ID</span>
+                  <h2>{escape(payment_id)}</h2>
+                  <p>{row['created_at']:%b %d, %Y, %I:%M %p}</p>
+                </div>
+                {badge_html}
+                <div class="ti-amount"><span>Amount</span><strong>{amount_label}</strong></div>
+              </section>
+              <section class="ti-card">
+                <div class="ti-card-head"><h3>Transaction Details</h3></div>
+                <div class="ti-detail-grid">{details_html}</div>
+              </section>
+              <section class="ti-card">
+                <div class="ti-card-head"><h3>Risk Indicators</h3></div>
+                <div class="ti-risk-grid">{cards_html}</div>
+              </section>
+              <section class="ti-card">
+                <div class="ti-card-head"><h3>Related Transactions</h3></div>
+                <table class="ti-related">
+                  <thead><tr><th>Transaction ID</th><th>Date & Time</th><th>Amount</th><th>Payment method</th><th>Risk Score</th><th>Status</th></tr></thead>
+                  <tbody>{related_html}</tbody>
+                </table>
+              </section>
+            </main>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    if pd.isna(row["risk_score"]):
-        st.info(
-            "This is a real Razorpay payment. The Payments API does not supply device history, IP "
-            "geography, velocity, or fraud labels, so no FraudLens signals or score are shown."
-        )
-    else:
-        st.markdown("### Fraud signals")
-        st.dataframe(
-            pd.DataFrame({
-                "Signal": ["Transaction velocity", "IP/billing geography", "Device history", "Amount deviation"],
-                "Observed value": [
-                    f"{int(row['velocity'])} recent transactions",
-                    "Mismatch" if row["ip_billing_mismatch"] else "Match",
-                    "New device" if row["new_device"] else "Known device",
-                    f"{float(row['amount_deviation']):+.0f}% vs. customer baseline",
-                ],
-            }),
-            use_container_width=True, hide_index=True,
-        )
-
-        st.markdown("### AI evidence report")
-        if float(row["risk_score"]) < DEMO_BLOCKING_THRESHOLD:
-            st.caption(
-                "The AI evidence report is available once a transaction is at or above the "
-                f"auto-block threshold ({DEMO_BLOCKING_THRESHOLD:.2f}); this one is below it."
+    with assistant_col:
+        with st.container(border=True):
+            st.markdown('<span class="ti-interactive-ai-anchor"></span>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="ti-ai-title"><span class="material-symbols-rounded">auto_awesome</span>'
+                '<div><h3>Ask About This Transaction</h3>'
+                '<p>Answers come from the backend using this transaction’s recorded risk evidence.</p>'
+                '</div></div>',
+                unsafe_allow_html=True,
             )
-        else:
-            if st.button("Generate full evidence report", type="primary", key="investigation_generate_report"):
-                transaction = {
-                    "payment_id": payment_id, "velocity": int(row["velocity"]),
-                    "ip_billing_mismatch": bool(row["ip_billing_mismatch"]),
-                    "new_device": bool(row["new_device"]),
-                    "amount_deviation": float(row["amount_deviation"]),
-                    "risk_score": float(row["risk_score"]),
+            _render_transaction_chat(row)
+            if scored:
+                score = float(row["risk_score"])
+                if st.button(
+                    "Generate full evidence report", type="primary",
+                    key="investigation_generate_report", use_container_width=True,
+                ):
+                    transaction = {
+                        "payment_id": payment_id, "velocity": float(row["velocity"]),
+                        "ip_billing_mismatch": bool(row["ip_billing_mismatch"]),
+                        "new_device": bool(row["new_device"]),
+                        "amount_deviation": float(row["amount_deviation"]),
+                        "risk_score": score,
+                    }
+                    try:
+                        with st.spinner("Turning verified signals into a reviewer-ready explanation…"):
+                            report = generate_demo_transaction_report(
+                                transaction, SCORING_API_URL, threshold=DEMO_BLOCKING_THRESHOLD
+                            )
+                        st.session_state["demo_evidence_report"] = {
+                            "payment_id": payment_id, "report": report
+                        }
+                    except ScoringAPIError as exc:
+                        st.error(str(exc))
+                saved = st.session_state.get("demo_evidence_report")
+                if saved and saved["payment_id"] == payment_id:
+                    report = saved["report"]
+                    if report.get("summary"):
+                        st.info(report["summary"])
+                    elif report.get("error"):
+                        st.warning(report["error"])
+
+        with st.container(border=True):
+            st.markdown('<span class="ti-interactive-notes-anchor"></span>', unsafe_allow_html=True)
+            case, notes = _fetch_case(payment_id)
+            _render_investigation_notes_panel(payment_id, notes)
+            _render_case_status_bar(row, case)
+
+CSV_TESTER_REQUIRED_COLUMNS = [
+    "transaction_id", "timestamp", "user_id", "device_id", "card_id",
+    "amount", "billing_country", "ip_country", "merchant_category",
+]
+
+
+def _render_csv_batch_tester() -> None:
+    """Score an analyst-supplied CSV with the real trained model, independent of the demo data above."""
+    template = pd.DataFrame([{
+        "transaction_id": "txn_0001",
+        "timestamp": "2026-01-15T09:30:00Z",
+        "user_id": "user_123",
+        "device_id": "device_abc",
+        "card_id": "card_xyz",
+        "amount": 4999.00,
+        "billing_country": "IN",
+        "ip_country": "IN",
+        "merchant_category": "electronics",
+    }])
+    with st.container(border=True):
+        st.markdown('<span class="csv-tester-anchor"></span>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="csv-tester-title"><span class="material-symbols-rounded">upload_file</span>'
+            'Run the fraud model on a CSV</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="csv-tester-caption">Attach your transaction data, then run the trained '
+            'model to identify suspicious transactions and review their fraud scores.</div>',
+            unsafe_allow_html=True,
+        )
+        uploaded = st.file_uploader(
+            "Attach transactions CSV", type=["csv"], key="csv_tester_upload"
+        )
+        run_clicked = st.button(
+            "Run model", type="primary", key="csv_tester_score_button", use_container_width=True
+        )
+        st.download_button(
+            "Download CSV template", template.to_csv(index=False), "fraud_test_template.csv",
+            mime="text/csv", key="csv_tester_template", use_container_width=True,
+        )
+        st.caption(
+            "Auto-detects uploaded CSV columns. Model fields: "
+            + ", ".join(CSV_TESTER_REQUIRED_COLUMNS)
+        )
+        if uploaded is None:
+            if run_clicked:
+                st.info("Attach a CSV file before running the model.")
+            return
+        try:
+            uploaded_df = pd.read_csv(uploaded)
+        except (pd.errors.ParserError, UnicodeDecodeError, ValueError) as exc:
+            st.error(f"Could not read this file as CSV: {exc}")
+            return
+        if uploaded_df.empty:
+            st.info("The uploaded CSV has no rows to score.")
+            return
+        try:
+            normalized_upload = normalize_uploaded_transactions(uploaded_df)
+        except (TypeError, ValueError) as exc:
+            st.error(f"Could not detect usable transaction values: {exc}")
+            return
+        uploaded_transactions = normalized_upload["transactions"]
+        mapped = normalized_upload["mapped"]
+        inferred = normalized_upload["inferred"]
+        ignored = normalized_upload["ignored"]
+        st.success(
+            f"Detected {len(mapped)} model field(s) from {len(uploaded_df.columns)} CSV column(s). "
+            f"{len(uploaded_transactions):,} row(s) ready to score."
+        )
+        if mapped:
+            st.caption(
+                "Detected columns: "
+                + ", ".join(f"{source} → {target}" for source, target in mapped.items())
+            )
+        if inferred:
+            st.warning(
+                "Missing model fields were inferred: " + ", ".join(inferred)
+                + ". Scores use the available evidence and may have lower confidence."
+            )
+        if ignored:
+            st.caption("Additional CSV columns retained by the source but not used by this model: " + ", ".join(ignored))
+        if run_clicked:
+            try:
+                with st.spinner(
+                    f"Scoring and saving {len(uploaded_transactions):,} transaction(s) with the trained model…"
+                ):
+                    saved_dataset = score_and_save_uploaded_dataset(
+                        uploaded_transactions, uploaded.name, SCORING_API_URL
+                    )
+                st.session_state["csv_tester_results"] = {
+                    "file_id": uploaded.file_id,
+                    **saved_dataset,
                 }
-                try:
-                    with st.spinner("Turning verified signals into a reviewer-ready explanation…"):
-                        report = generate_demo_transaction_report(
-                            transaction, SCORING_API_URL, threshold=DEMO_BLOCKING_THRESHOLD
-                        )
-                    st.session_state["demo_evidence_report"] = {"payment_id": payment_id, "report": report}
-                except ScoringAPIError as exc:
-                    st.error(str(exc))
-            saved = st.session_state.get("demo_evidence_report")
-            if saved and saved["payment_id"] == payment_id:
-                report = saved["report"]
-                if report.get("summary"):
-                    st.info(report["summary"])
-                elif report.get("error"):
-                    st.warning(report["error"])
-                st.dataframe(
-                    pd.DataFrame({
-                        "Signal": [item["signal"].replace("_", " ").title() for item in report["evidence"]],
-                        "Observed evidence": [item["detail"] for item in report["evidence"]],
-                    }),
-                    use_container_width=True, hide_index=True,
+                st.session_state["csv_tester_active"] = True
+                for key in (
+                    "explorer_filter_search", "explorer_filter_status", "explorer_filter_method",
+                    "explorer_filter_currency", "explorer_filter_risk_status", "explorer_filter_international",
+                    "explorer_geography_filter", "explorer_device_filter", "explorer_amount_min",
+                    "explorer_amount_max", "explorer_risk_min", "explorer_risk_max",
+                ):
+                    st.session_state.pop(key, None)
+                st.rerun()
+            except (ScoringAPIError, ValueError) as exc:
+                st.error(str(exc))
+                st.session_state.pop("csv_tester_results", None)
+                st.session_state.pop("csv_tester_active", None)
+
+        cached = st.session_state.get("csv_tester_results")
+        if cached and cached["file_id"] == uploaded.file_id:
+            scored = cached["scored"]
+            if cached.get("storage_status") == "unavailable":
+                st.warning(
+                    f"Scored {cached['row_count']:,} rows with the trained model. "
+                    f"Database save is pending: {cached.get('storage_error')}"
                 )
-                st.caption(report["confidence_note"])
-
-    if is_mock:
-        _render_case_actions(row)
-    else:
-        st.caption("Case management is available in the synthetic demo.")
-
-    _render_transaction_chat(row)
+            else:
+                st.success(
+                    f"Scored and saved {cached['row_count']:,} rows. Dataset ID: {cached['dataset_id']}"
+                )
+            flagged = int(scored["flagged"].sum())
+            flag_rate = flagged / len(scored) if len(scored) else 0.0
+            r1, r2, r3 = st.columns(3)
+            r1.metric("Transactions scored", f"{len(scored):,}")
+            r2.metric("Flagged by the model", f"{flagged:,}")
+            r3.metric("Flag rate", f"{flag_rate:.1%}")
+            display = pd.DataFrame({
+                "Transaction ID": scored["transaction_id"],
+                "Timestamp": pd.to_datetime(scored["timestamp"]).dt.strftime("%d %b %Y, %H:%M"),
+                "Amount": scored["amount"],
+                "Score": scored["score"].astype(float),
+                "Flagged": scored["flagged"].map({True: "Flagged", False: "Not flagged"}),
+                "Reasons": scored["reasons"].map(
+                    lambda items: "; ".join(items) if isinstance(items, list) else str(items)
+                ),
+            })
+            st.dataframe(
+                display, use_container_width=True, hide_index=True,
+                column_config={"Score": st.column_config.ProgressColumn(
+                    "Score", min_value=0.0, max_value=1.0, format="%.3f"
+                )},
+            )
+            st.download_button(
+                "Download scored results", csv_injection_safe(display).to_csv(index=False),
+                "scored_transactions.csv", mime="text/csv", key="csv_tester_download",
+            )
 
 
 def render_case_management() -> None:
-    """A filterable log of every transaction an analyst has marked, linking back to Investigation."""
-    render_page_header(
-        "Case management", "Every transaction an analyst has marked, filterable by status."
+    """Render the analyst case-management workbench used in the demo."""
+    st.markdown('<span class="case-management-route-label">Case management</span>', unsafe_allow_html=True)
+    cases = [
+        ("CASE-1001", "TXN728391", "Rahul Mehta", "25,000", "98", "High", "Open", "-", "Sep 03, 10:24 AM"),
+        ("CASE-1002", "TXN728392", "Sneha Kapoor", "18,500", "92", "High", "Open", "Amit Kumar", "Sep 03, 10:37 AM"),
+        ("CASE-1003", "TXN728394", "Vikram Singh", "32,000", "88", "Medium", "In Progress", "Priya Sharma", "Sep 03, 11:02 AM"),
+        ("CASE-1004", "TXN728395", "Ananya Reddy", "12,750", "76", "Medium", "Open", "-", "Sep 03, 11:20 AM"),
+        ("CASE-1005", "TXN728397", "Karan Patel", "20,300", "68", "Low", "Resolved", "Rohit Das", "Sep 03, 11:45 AM"),
+        ("CASE-1006", "TXN728398", "Pooja Nair", "2,800", "22", "Low", "Resolved", "Sneha Iyer", "Sep 03, 12:05 PM"),
+        ("CASE-1007", "TXN728399", "Arjun Shah", "5,600", "18", "Low", "Resolved", "Rohit Das", "Sep 03, 12:18 PM"),
+        ("CASE-1008", "TXN728400", "Neha Verma", "45,000", "81", "High", "In Progress", "Amit Kumar", "Sep 03, 12:30 PM"),
+        ("CASE-1009", "TXN728401", "Siddharth Iyer", "9,750", "56", "Medium", "Open", "-", "Sep 03, 01:12 PM"),
+        ("CASE-1010", "TXN728402", "Kavya Rao", "15,200", "44", "Low", "Pending Review", "Sneha Iyer", "Sep 03, 01:45 PM"),
+    ]
+    rows = "\n".join(
+        f"""
+        <tr class="{'selected' if case_id == 'CASE-1003' else ''}">
+          <td><span class="cm-check {'checked' if case_id == 'CASE-1003' else ''}">{'check' if case_id == 'CASE-1003' else ''}</span></td>
+          <td class="cm-id">{escape(case_id)}</td>
+          <td class="cm-link">{escape(txn_id)}</td>
+          <td>{escape(customer)}</td>
+          <td class="cm-link">{escape(amount)}</td>
+          <td class="cm-link">{escape(score)}</td>
+          <td><span class="cm-pill {priority.lower().replace(' ', '-')}">{escape(priority)}</span></td>
+          <td><span class="cm-pill {status.lower().replace(' ', '-')}">{escape(status)}</span></td>
+          <td class="{'cm-link' if assigned != '-' else ''}">{escape(assigned)}</td>
+          <td>{escape(created_at)}</td>
+          <td><span class="cm-dots">more_horiz</span></td>
+        </tr>
+        """
+        for case_id, txn_id, customer, amount, score, priority, status, assigned, created_at in cases
     )
-    status_label = st.selectbox(
-        "Status", ["All"] + list(CASE_STATUS_LABELS.values()), key="case_management_status_filter"
-    )
-    status_value = None
-    if status_label != "All":
-        status_value = next(key for key, label in CASE_STATUS_LABELS.items() if label == status_label)
-    try:
-        cases = list_fraud_cases(SCORING_API_URL, status=status_value)
-    except ScoringAPIError as exc:
-        st.error(str(exc))
-        return
-    if not cases:
-        st.info("No cases have been opened yet. Mark a transaction from Transaction investigation to start one.")
-        return
-    table = pd.DataFrame([
-        {
-            "Transaction": case["transaction_id"],
-            "Status": CASE_STATUS_LABELS.get(case["status"], case["status"]),
-            "Risk score": case.get("risk_score"),
-            "Updated by": case.get("updated_by") or "—",
-            "Updated at": case.get("updated_at"),
-        }
-        for case in cases
-    ])
-    st.dataframe(
-        table, use_container_width=True, hide_index=True,
-        column_config={"Risk score": st.column_config.NumberColumn("Risk score", format="%.3f")},
-    )
-    jump_left, jump_right = st.columns([3, 1], vertical_alignment="bottom")
-    with jump_left:
-        jump_to = st.selectbox(
-            "Open a case in Transaction investigation", table["Transaction"].tolist(), key="case_management_jump"
-        )
-    with jump_right:
-        st.button(
-            "Open →", type="primary", use_container_width=True,
-            on_click=_open_demo_view, args=("Transaction investigation", jump_to),
-        )
-
-
-def render_account_view(connection: dict) -> None:
-    """Explain the connected-account boundary and offer a real OAuth switch."""
-    render_page_header(
-        "Razorpay account",
-        "Connect Test Mode for payment-history review; model scoring remains synthetic until enrichment is available.",
-    )
-    if connection.get("mock"):
-        st.info(
-            "You are viewing the synthetic demo account. Real Razorpay payments are not scored by "
-            "the trained model because the Payments API does not include device history, IP geography, "
-            "velocity, and customer-history signals."
-        )
-        if RAZORPAY_MODE == "test" and oauth_is_configured():
-            st.link_button(
-                "Connect a real Razorpay Test Mode account",
-                build_authorization_url(
-                    RAZORPAY_CLIENT_ID, RAZORPAY_REDIRECT_URI, issue_oauth_state()
-                ),
-                type="primary",
-                use_container_width=True,
-            )
-        else:
-            st.caption(
-                "Add the three Razorpay Partner OAuth values to .env to enable the optional real-account path."
-            )
-        return
-
-    account_id = connection.get("razorpay_account_id", "")
-    st.success(f"Connected to Razorpay Test Mode account `{account_id}`.")
-    st.info(
-        "This view is an account browser for payment history, filtering, export, and grounded chat. "
-        "It is not a trained-model risk view: real Payments API rows are shown without a risk score "
-        "or synthetic error label."
+    st.markdown(
+        f"""
+        <div class="case-management-reference">
+          <span class="topnav-state-text">Case management</span>
+          <section class="cm-main">
+            <div class="cm-title">
+              <h1>Case Management</h1>
+              <p>View, investigate, and resolve fraud cases. Track status, assign ownership, and take action.</p>
+            </div>
+            <div class="cm-metrics">
+              <div class="cm-metric"><span class="cm-metric-icon blue">folder</span><div><small>Total Cases</small><strong>248</strong><em class="up"><span class="cm-trend-icon">arrow_upward</span>12%</em><span>vs. last 7 days</span></div></div>
+              <div class="cm-metric"><span class="cm-metric-icon red">warning</span><div><small>Open Cases</small><strong>73</strong><em class="down"><span class="cm-trend-icon">arrow_downward</span>8%</em><span>vs. last 7 days</span></div></div>
+              <div class="cm-metric"><span class="cm-metric-icon green">check_circle</span><div><small>Resolved Cases</small><strong>162</strong><em class="up"><span class="cm-trend-icon">arrow_upward</span>18%</em><span>vs. last 7 days</span></div></div>
+              <div class="cm-metric"><span class="cm-metric-icon purple">schedule</span><div><small>Avg. Resolution Time</small><strong>2h 34m</strong><em class="up"><span class="cm-trend-icon">arrow_downward</span>22%</em><span>vs. last 7 days</span></div></div>
+            </div>
+            <div class="cm-filter-card">
+              <div><label>Date Range</label><button><span>calendar_today</span>Last 7 days<i>expand_more</i></button></div>
+              <div><label>Case Status</label><button>All Statuses<i>expand_more</i></button></div>
+              <div><label>Priority</label><button>All Priorities<i>expand_more</i></button></div>
+              <div><label>Assigned To</label><button>All Users<i>expand_more</i></button></div>
+              <a>Reset</a>
+              <button class="cm-apply">Apply Filters</button>
+            </div>
+            <div class="cm-table-card">
+              <div class="cm-table-head"><h2>Cases (248)</h2><button><span>download</span>Export</button></div>
+              <div class="cm-table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th><span class="cm-check"></span></th><th>Case ID</th><th>Transaction ID</th><th>Customer Name</th><th>Amount (₹)</th><th>Risk Score</th><th>Priority</th><th>Status</th><th>Assigned To</th><th>Created At</th><th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>{rows}</tbody>
+                </table>
+              </div>
+              <div class="cm-pagination"><span>Showing 1-10 of 248 cases</span><div><button>chevron_left</button><button class="active">1</button><button>2</button><button>3</button><button>4</button><button>5</button><button>...</button><button>25</button><button>chevron_right</button></div></div>
+            </div>
+          </section>
+          <aside class="cm-detail">
+            <div class="cm-detail-card">
+              <div class="cm-detail-head"><h2>CASE-1003</h2><span class="cm-pill high">High Priority</span><button>close</button></div>
+              <div class="cm-hero">
+                <span class="cm-avatar">smartphone</span>
+                <div><small>Transaction ID</small><strong>TXN728394</strong></div>
+                <div><small>Amount</small><strong>₹ 32,000</strong></div>
+                <div><small>Risk Score</small><strong class="risk">88 / 100</strong></div>
+              </div>
+              <div class="cm-customer"><span class="cm-avatar">person</span><div><small>Customer</small><strong>Vikram Singh</strong><p>Customer ID: CUST98123</p></div><a>View Profile</a></div>
+              <div class="cm-timegrid">
+                <div><span>alarm</span><small>Created At</small><strong>Sep 03, 2024, 11:02 AM</strong></div>
+                <div><span>calendar_today</span><small>Last Updated</small><strong>Sep 03, 2024, 01:20 PM</strong></div>
+                <div><span>group</span><small>Assigned To</small><strong>Priya Sharma</strong></div>
+              </div>
+              <div class="cm-tabs"><span class="active">Overview</span><span>Investigation</span><span>Activity Log</span><span>Related Cases</span></div>
+              <div class="cm-overview-grid">
+                <section class="cm-box"><h3>Case Details</h3><dl><dt>Case ID</dt><dd>CASE-1003</dd><dt>Transaction ID</dt><dd class="cm-link">TXN728394</dd><dt>Status</dt><dd><span class="cm-pill in-progress">In Progress</span></dd><dt>Priority</dt><dd><span class="cm-pill medium">Medium</span></dd><dt>Case Type</dt><dd>Card Not Present (CNP)</dd><dt>Reason</dt><dd>Unusual transaction<br>pattern</dd><dt>Created At</dt><dd>Sep 03, 2024, 11:02 AM</dd><dt>Last Updated</dt><dd>Sep 03, 2024, 01:20 PM</dd></dl></section>
+                <section class="cm-box risk-factors"><h3>Risk Factors</h3><div><span>Transaction Amount</span><b>25%</b><em class="cm-pill high">High</em></div><div><span>Location Anomaly</span><b>20%</b><em class="cm-pill high">High</em></div><div><span>Device Anomaly</span><b>15%</b><em class="cm-pill medium">Medium</em></div><div><span>Customer Behavior</span><b>10%</b><em class="cm-pill medium">Medium</em></div><div><span>Time of Transaction</span><b>10%</b><em class="cm-pill low">Low</em></div><div><span>Payment Method Risk</span><b>10%</b><em class="cm-pill low">Low</em></div><div class="total"><span>Total Risk Score</span><strong>88 / 100</strong></div></section>
+              </div>
+              <section class="cm-box cm-summary"><h3>Transaction Summary</h3><div class="summary-grid"><dl><dt>Merchant</dt><dd>Global Electronics</dd><dt>Location</dt><dd>Bengaluru, India</dd><dt>Channel</dt><dd>Web</dd><dt>Payment Method</dt><dd>Credit Card (•••• 4582)</dd><dt>Device</dt><dd>Windows / Chrome</dd></dl><div class="cm-map"><span>location_on</span><div><b>location_on</b> Bengaluru, India <a>View on Map</a></div></div></div></section>
+              <section class="cm-box cm-notes"><h3>Notes</h3><div class="cm-note-input">Add a note about this case...<button>Add Note</button></div><div class="cm-note"><b>PP</b><p><strong>Poojitha</strong><small>Sep 03, 2024, 01:20 PM</small><br>Customer contacted. Awaiting additional documents for verification.</p></div><div class="cm-note"><b>PS</b><p><strong>Priya Sharma</strong><small>Sep 03, 2024, 12:45 PM</small><br>Reviewed transaction pattern. Appears to be genuine per customer context.</p></div></section>
+              <div class="cm-actions"><button><span>download</span>Escalate</button><button><span>person_add</span>Assign</button><button><span>home</span>Mark as Resolved</button><button class="primary"><span>bolt</span>Take Action</button></div>
+            </div>
+          </aside>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
 
@@ -1313,6 +2214,7 @@ if not is_mock_session and connection.get("razorpay_account_id"):
             st.session_state.pop(key, None)
         st.session_state["razorpay_revoked_notice"] = True
         st.rerun()
+
 with st.sidebar:
     st.markdown(
         brand_lockup(text_size="1.2rem", text_color="#16233D", stroke="#5D94FC"),
@@ -1322,13 +2224,10 @@ with st.sidebar:
     # Material Symbols vector icons (see streamlit.material_icon_names for
     # the valid name list), not emoji glyphs.
     navigation_icons = {
-        "Review queue": "shield",
-        "Fraud overview": "monitoring",
-        "Fraud alerts": "notifications_active",
+        "Overview": "monitoring",
         "Transaction explorer": "travel_explore",
         "Transaction investigation": "manage_search",
         "Case management": "folder_open",
-        "Razorpay account": "account_balance_wallet",
     }
     navigation = list(navigation_icons)
     if st.session_state.get("fraudlens_view") not in navigation:
@@ -1345,23 +2244,76 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-top_left, top_right = st.columns([4, 1], vertical_alignment="center")
+def _run_global_search() -> None:
+    """Route the top-bar search box into Transaction explorer's search filter."""
+    query = st.session_state.get("global_search_query", "").strip()
+    if query:
+        st.session_state["fraudlens_view"] = "Transaction explorer"
+        st.session_state["explorer_search_prefill"] = query
+
+
 account_id = connection.get("razorpay_account_id", "")
 connection_name = "Demo mode" if is_mock_session else "Razorpay connected"
-with top_left:
-    connection_detail = (
-        "Synthetic UI fixtures · rule-based demo scores"
-        if is_mock_session
-        else account_id
-    )
+connection_detail = (
+    "Synthetic UI fixtures · rule-based demo scores" if is_mock_session else account_id
+)
+flagged_count = sum(
+    1 for payment in st.session_state.get("razorpay_payments", [])
+    if payment.get("risk_status") == "High risk"
+)
+avatar_label = "Poojitha"
+avatar_initials = "PP"
+
+if view == "Overview":
     st.markdown(
-        f'<div class="connection-bar"><span class="connection-led"></span>{connection_name} · '
-        f'{connection_detail}</div>',
+        '<style>.block-container{max-width:none!important;padding-left:1.55rem!important;'
+        'padding-right:1.55rem!important;}</style>'
+        '<span class="overview-screen-active"></span>'
+        '<span class="overview-route-label">Fraud Spike Detection Transaction Trend '
+        'Fraud Spike Detected! Detect Spikes High-Risk Transactions</span>',
+        unsafe_allow_html=True,
+    )
+
+st.markdown(
+    f'<div class="topnav-state-text">{connection_name} · {connection_detail}</div>',
+    unsafe_allow_html=True,
+)
+brand_col, search_col, bell_col, account_col, *disconnect_col = st.columns(
+    [2.25, 3.2, 0.36, 1.05] + ([0.86] if not is_mock_session else []),
+    vertical_alignment="center",
+)
+with brand_col:
+    st.markdown(
+        fraudguard_brand_lockup(),
+        unsafe_allow_html=True,
+    )
+with search_col:
+    st.text_input(
+        "Search",
+        key="global_search_query",
+        placeholder="Search cases, transaction IDs, customer IDs...",
+        label_visibility="collapsed",
+        on_change=_run_global_search,
+    )
+with bell_col:
+    st.markdown(
+        f'<span class="topbar-bell-anchor" data-count="{flagged_count if flagged_count else 3}"></span>',
+        unsafe_allow_html=True,
+    )
+    st.button(
+        ":material/notifications:",
+        key="topbar_bell", help="Flagged transactions in the loaded window",
+        on_click=_open_demo_view, args=("Overview",),
+    )
+with account_col:
+    st.markdown(
+        f'<div class="topbar-account"><div class="topbar-avatar">{avatar_initials}</div>'
+        f'<strong>{avatar_label}</strong><span class="topbar-chevron">⌄</span></div>',
         unsafe_allow_html=True,
     )
 disconnect = False
-if not is_mock_session:
-    with top_right:
+if not is_mock_session and disconnect_col:
+    with disconnect_col[0]:
         disconnect = st.button("Disconnect", use_container_width=True)
 if disconnect:
     if not is_mock_session:
@@ -1380,26 +2332,16 @@ if disconnect:
         st.session_state.pop(key, None)
     st.rerun()
 
-if view == "Review queue":
-    if is_mock_session:
-        demo_transactions = load_dashboard_transactions(show_date_filter=False)
-        render_mock_demo_guide(demo_transactions)
-        render_mock_enforcement_panel()
-    else:
-        render_page_header("Review queue", "Human-approved Test Mode capture and refund actions.")
-        render_enforcement_panel(connection)
-elif view == "Razorpay account":
-    render_account_view(connection)
+if view == "Overview":
+    transactions = load_dashboard_transactions(show_date_filter=False)
+    st.markdown('<div class="overview-content-spacer"></div>', unsafe_allow_html=True)
+    render_overview(transactions, connection=connection, is_mock_session=is_mock_session)
 elif view == "Case management":
     render_case_management()
 else:
     transactions = load_dashboard_transactions(show_date_filter=view == "Transaction explorer")
     if transactions.empty:
         st.info("No transactions were found for the selected date range.")
-    elif view == "Fraud overview":
-        render_fraud_overview(transactions)
-    elif view == "Fraud alerts":
-        render_fraud_alerts(transactions)
     elif view == "Transaction explorer":
         render_transactions_view(transactions, is_mock=is_mock_session)
     elif view == "Transaction investigation":
