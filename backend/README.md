@@ -18,6 +18,11 @@ returns scores, decisions, reasons, and dataset-level signal influence. It also 
 store the parsed rows and outputs in Supabase. If Supabase migrations are not applied yet,
 the response still includes model results with `storage_status: "unavailable"`.
 
+Batch results also include the reviewer-facing parameters `velocity`, `ip_billing`,
+`device`, `amount_deviation`, `hour`, `status`, and optional `actual` labels. These
+values are produced or normalized by the backend and are persisted with uploaded rows;
+`actual` is only populated when the upload contains a ground-truth label.
+
 API documentation: <http://localhost:8000/docs>
 
 Regenerate the model and global SHAP artifact:

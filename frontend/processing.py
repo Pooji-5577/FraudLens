@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from math import isfinite
 from pathlib import Path
 import re
 
@@ -27,8 +28,18 @@ _UPLOAD_COLUMN_ALIASES = {
     "billing_country": {"billing_country", "billingcountry", "billing_country_code", "billingcountrycode", "country"},
     "ip_country": {"ip_country", "ipcountry", "ip_country_code", "ipcountrycode", "location_country", "locationcountry"},
     "merchant_category": {"merchant_category", "merchantcategory", "merchant_category_code", "merchantcategorycode", "mcc", "method", "payment_method", "paymentmethod"},
-    "uploaded_velocity_per_hour": {"velocity", "velocity_per_hour", "velocityperhour", "txn_velocity", "transaction_velocity"},
+    "uploaded_velocity_per_hour": {
+        "velocity", "velocity_per_hour", "velocityperhour", "txn_velocity", "transaction_velocity",
+        "velocity_hr", "velocity_h", "transactions_per_hour",
+    },
     "ip_address": {"ip_address", "ipaddress", "ip", "client_ip", "clientip"},
+    "ip_billing": {
+        "ip_billing", "ipbilling", "ip_billing_status", "ipbillingstatus", "geography", "geo_status",
+        "geo_mismatch", "ip_billing_mismatch",
+    },
+    "amount_deviation": {"amount_deviation", "amountdeviation", "amount_dev", "amt_dev", "amtdeviation", "amount_delta", "amount_zscore"},
+    "hour": {"hour", "transaction_hour", "transactionhour", "txn_hour", "hour_utc"},
+    "actual": {"actual", "actual_label", "label", "is_fraud", "fraud", "fraud_label", "ground_truth", "groundtruth"},
 }
 
 
@@ -43,6 +54,86 @@ def _parse_velocity_per_hour(value: object) -> float | None:
         return None
     count = float(match.group(1))
     return count / 24.0 if "24" in text else count
+
+
+def _parse_optional_number(value: object) -> float | None:
+    if value is None or value is pd.NA:
+        return None
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", str(value).strip().replace(",", ""))
+    if not match:
+        return None
+    parsed = float(match.group(0))
+    return parsed if isfinite(parsed) else None
+
+
+def _parse_hour(value: object) -> int | None:
+    """Parse 24-hour values as well as friendly values such as ``10:18 PM``."""
+    if value is None or value is pd.NA:
+        return None
+    text = str(value).strip().casefold()
+    if not text:
+        return None
+    match = re.search(r"(\d{1,2})(?::\d{1,2})?\s*(a\.?m\.?|p\.?m\.?)?", text)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    meridiem = (match.group(2) or "").replace(".", "")
+    if meridiem:
+        if hour < 1 or hour > 12:
+            return None
+        if meridiem == "pm" and hour != 12:
+            hour += 12
+        elif meridiem == "am" and hour == 12:
+            hour = 0
+    return hour if 0 <= hour <= 23 else None
+
+
+def _normalize_ip_billing(value: object) -> str | None:
+    if value is None or value is pd.NA:
+        return None
+    if isinstance(value, bool):
+        return "Mismatch" if value else "Match"
+    text = str(value).strip()
+    if not text or text.casefold() in {"nan", "none", "null", "n/a", "na", "unknown"}:
+        return None
+    normalized = re.sub(r"[^a-z]+", " ", text.casefold()).strip()
+    if normalized in {"match", "matched", "same", "same country", "no mismatch", "false", "0"}:
+        return "Match"
+    if normalized in {"mismatch", "mismatched", "different", "different country", "true", "1"}:
+        return "Mismatch"
+    return text
+
+
+def _ip_billing_mismatch(value: object) -> bool | None:
+    """Infer a mismatch from either a status or a pair of country codes."""
+    normalized = _normalize_ip_billing(value)
+    if normalized is None:
+        return None
+    if normalized == "Match":
+        return False
+    if normalized == "Mismatch":
+        return True
+    codes = [
+        code for code in re.findall(r"\b[A-Z]{2}\b", str(normalized).upper())
+        if code not in {"IP", "ID"}
+    ]
+    return codes[0] != codes[-1] if len(codes) >= 2 else None
+
+
+def _normalize_actual(value: object) -> str | None:
+    if value is None or value is pd.NA:
+        return None
+    if isinstance(value, bool):
+        return "Fraud" if value else "Legitimate"
+    text = str(value).strip()
+    if not text or text.casefold() in {"nan", "none", "null", "n/a", "na", "unknown"}:
+        return None
+    normalized = text.casefold()
+    if normalized in {"1", "true", "yes", "fraud", "fraudulent", "positive"}:
+        return "Fraud"
+    if normalized in {"0", "false", "no", "legitimate", "legit", "genuine", "negative"}:
+        return "Legitimate"
+    return text
 
 
 def _ip_country_from_address(value: object, billing_country: object) -> str:
@@ -99,6 +190,12 @@ def normalize_uploaded_transactions(frame: pd.DataFrame) -> dict:
 
     if "timestamp" in selected:
         output["timestamp"] = pd.to_datetime(frame[selected["timestamp"]], utc=True, errors="raise")
+    elif "hour" in selected:
+        parsed_hours = frame[selected["hour"]].map(_parse_hour)
+        output["timestamp"] = pd.Timestamp("2000-01-01", tz="UTC") + pd.to_timedelta(
+            parsed_hours.fillna(0), unit="h"
+        ) + pd.to_timedelta(row_numbers - 1, unit="s")
+        inferred.append("timestamp")
     else:
         output["timestamp"] = pd.Timestamp("2000-01-01", tz="UTC") + pd.to_timedelta(
             row_numbers - 1, unit="s"
@@ -160,6 +257,14 @@ def normalize_uploaded_transactions(frame: pd.DataFrame) -> dict:
             )
         ]
         mapped[str(selected["ip_address"])] = "ip_country"
+    elif "ip_billing" in selected:
+        ip_billing = frame[selected["ip_billing"]].map(_normalize_ip_billing)
+        output["ip_country"] = [
+            billing
+            if _ip_billing_mismatch(value) is not True
+            else "EXTERNAL"
+            for value, billing in zip(ip_billing, output["billing_country"], strict=True)
+        ]
     else:
         output["ip_country"] = output["billing_country"]
         inferred.append("ip_country")
@@ -175,8 +280,33 @@ def normalize_uploaded_transactions(frame: pd.DataFrame) -> dict:
         )
     if "ip_address" in selected:
         output["ip_address"] = frame[selected["ip_address"]].astype(str).str.strip()
+    if "ip_billing" in selected:
+        output["ip_billing"] = frame[selected["ip_billing"]].map(_normalize_ip_billing)
+    if "device_id" in selected:
+        device_values = frame[selected["device_id"]].astype(str).str.strip()
+        device_statuses = device_values.map(
+            lambda value: (
+                "New" if value.casefold() in {"new", "new device", "first seen"}
+                else "Known" if value.casefold() in {"known", "known device", "existing"}
+                else None
+            )
+        )
+        # A source column containing New/Known is a display signal, not a
+        # device identifier. Preserve it separately while retaining the
+        # existing device_id mapping for model compatibility.
+        if device_statuses.notna().all():
+            output["device"] = device_statuses
+    if "amount_deviation" in selected:
+        output["amount_deviation"] = frame[selected["amount_deviation"]].map(_parse_optional_number)
+    if "hour" in selected:
+        output["hour"] = frame[selected["hour"]].map(_parse_hour)
+    if "actual" in selected:
+        output["actual"] = frame[selected["actual"]].map(_normalize_actual)
     optional_order = [
-        column for column in ("currency", "uploaded_velocity_per_hour", "ip_address")
+        column for column in (
+            "currency", "uploaded_velocity_per_hour", "ip_address", "ip_billing", "device",
+            "amount_deviation", "hour", "actual",
+        )
         if column in output.columns
     ]
     ignored = [str(column) for column in frame.columns if str(column) not in mapped]
@@ -211,17 +341,49 @@ def uploaded_scores_to_dashboard_transactions(
     result["email"] = scored["user_id"].astype(str)
     result["contact"] = ""
     result["international"] = result["currency"].ne("INR")
-    result["velocity"] = scored.get("card_txn_count_1h", pd.Series(None, index=scored.index))
-    result["ip_billing_mismatch"] = scored.get("geo_mismatch", pd.Series(None, index=scored.index))
-    result["new_device"] = scored.get("is_new_device", pd.Series(None, index=scored.index))
-    result["amount_deviation"] = scored.get("user_amount_zscore", pd.Series(None, index=scored.index))
+
+    def first_available(*columns: str) -> pd.Series:
+        for column in columns:
+            if column in scored.columns:
+                candidate = scored[column]
+                if candidate.notna().any():
+                    return candidate
+        return pd.Series([None] * len(scored), index=scored.index)
+
+    result["velocity"] = first_available(
+        "velocity", "uploaded_velocity_per_hour", "card_txn_count_1h"
+    )
+    result["ip_billing"] = first_available("ip_billing")
+    result["ip_billing_mismatch"] = first_available("geo_mismatch")
+    result["new_device"] = first_available("is_new_device")
+    result["device"] = first_available("device")
+    result.loc[
+        result["ip_billing"].isna() & result["ip_billing_mismatch"].notna(),
+        "ip_billing",
+    ] = result.loc[
+        result["ip_billing"].isna() & result["ip_billing_mismatch"].notna(),
+        "ip_billing_mismatch",
+    ].map({1.0: "Mismatch", 0.0: "Match", True: "Mismatch", False: "Match"})
+    result.loc[
+        result["device"].isna() & result["new_device"].notna(), "device"
+    ] = result.loc[
+        result["device"].isna() & result["new_device"].notna(), "new_device"
+    ].map({1.0: "New", 0.0: "Known", True: "New", False: "Known"})
+    result["amount_deviation"] = first_available(
+        "amount_deviation", "user_amount_zscore"
+    )
+    result["hour"] = first_available("hour")
+    result.loc[result["hour"].isna(), "hour"] = result.loc[
+        result["hour"].isna(), "created_at"
+    ].dt.hour
     result["risk_score"] = pd.to_numeric(scored["score"], errors="raise")
     flagged = scored["flagged"].astype(bool)
     result["risk_status"] = result["risk_score"].map(
         lambda score: "Review" if score >= review_threshold else "Low risk"
     )
     result.loc[flagged, "risk_status"] = "High risk"
-    result["actual"] = None
+    result["actual"] = first_available("actual")
+    result["model_status"] = first_available("status")
     result["reasons"] = scored.get("reasons", pd.Series([[] for _ in range(len(scored))], index=scored.index))
     return result.sort_values("created_at", ascending=False, ignore_index=True)
 
@@ -451,6 +613,22 @@ def chronological_transactions(transactions: pd.DataFrame) -> pd.DataFrame:
     return ordered.sort_values(tie_breakers, kind="mergesort", ignore_index=True)
 
 
+def _merge_score_results(ordered: pd.DataFrame, results: list[dict]) -> pd.DataFrame:
+    """Merge every field returned by the backend without losing upload metadata."""
+    result = ordered.copy()
+    response_columns = list(dict.fromkeys(
+        column for row in results for column in row.keys()
+    ))
+    for column in response_columns:
+        if column == "timestamp":
+            # Keep the timezone-aware timestamp parsed from the upload. The
+            # backend's ISO string is equivalent but would change the local
+            # DataFrame dtype for downstream display and sorting.
+            continue
+        result[column] = [row.get(column) for row in results]
+    return result
+
+
 def scoring_api_available(api_url: str, timeout: float = 1.5) -> bool:
     try:
         response = requests.get(f"{api_url.rstrip('/')}/health", timeout=timeout)
@@ -498,10 +676,7 @@ def score_uploaded_transactions(
         raise ScoringAPIError("The scoring service returned an incomplete batch.")
     if any(not isinstance(row, dict) or not required <= row.keys() for row in results):
         raise ScoringAPIError("The scoring service returned an unexpected result format.")
-    result = ordered.copy()
-    for column in ("score", "flagged", "blocked", "reasons"):
-        result[column] = [row[column] for row in results]
-    return result
+    return _merge_score_results(ordered, results)
 
 
 def score_and_save_uploaded_dataset(
@@ -538,7 +713,10 @@ def score_and_save_uploaded_dataset(
     except ValueError as exc:
         raise ScoringAPIError("The scoring service returned an invalid dataset response.") from exc
 
-    required_body = {"dataset_id", "filename", "row_count", "results"}
+    required_body = {
+        "dataset_id", "filename", "row_count", "results",
+        "signal_importance_percent", "signal_support_percent", "decision_threshold",
+    }
     required_result = {"score", "flagged", "blocked", "reasons"}
     if not isinstance(body, dict) or not required_body <= body.keys():
         raise ScoringAPIError("The scoring service returned an invalid dataset response.")
@@ -549,9 +727,28 @@ def score_and_save_uploaded_dataset(
         or any(not isinstance(row, dict) or not required_result <= row.keys() for row in results)
     ):
         raise ScoringAPIError("The scoring service returned incomplete dataset results.")
-    scored = ordered.copy()
-    for column in ("score", "flagged", "blocked", "reasons"):
-        scored[column] = [row[column] for row in results]
+    signal_importance = body["signal_importance_percent"]
+    if not isinstance(signal_importance, dict) or not signal_importance:
+        raise ScoringAPIError(
+            "The scoring service returned no dataset signal importance. Restart the backend and try again."
+        )
+    try:
+        signal_importance = {
+            str(signal): float(percent) for signal, percent in signal_importance.items()
+        }
+    except (TypeError, ValueError) as exc:
+        raise ScoringAPIError("The scoring service returned invalid dataset signal importance.") from exc
+    signal_support = body["signal_support_percent"]
+    if not isinstance(signal_support, dict):
+        raise ScoringAPIError("The scoring service returned invalid dataset signal coverage.")
+    try:
+        signal_support = {
+            str(signal): float(percent) for signal, percent in signal_support.items()
+        }
+    except (TypeError, ValueError) as exc:
+        raise ScoringAPIError("The scoring service returned invalid dataset signal coverage.") from exc
+
+    scored = _merge_score_results(ordered, results)
     dataset_id = body["dataset_id"]
     return {
         "dataset_id": str(dataset_id) if dataset_id is not None else None,
@@ -560,8 +757,9 @@ def score_and_save_uploaded_dataset(
         "scored": scored,
         "storage_status": str(body.get("storage_status", "saved")),
         "storage_error": body.get("storage_error"),
-        "signal_importance_percent": body.get("signal_importance_percent"),
-        "decision_threshold": body.get("decision_threshold"),
+        "signal_importance_percent": signal_importance,
+        "signal_support_percent": signal_support,
+        "decision_threshold": float(body["decision_threshold"]),
     }
 
 

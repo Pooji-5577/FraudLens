@@ -90,7 +90,10 @@ def fraudguard_brand_lockup() -> str:
     return (
         '<div class="fraudguard-brand-lockup">'
         f'<span class="fraudguard-brand-mark">{FRAUDGUARD_SHIELD_SVG}</span>'
-        '<span>FraudGuard</span>'
+        '<div class="fraudguard-brand-text">'
+        '<span class="fraudguard-brand-name">FraudLens</span>'
+        '<span class="fraudguard-brand-tagline">Detect <b>•</b> Analyze <b>•</b> Prevent</span>'
+        '</div>'
         '</div>'
     )
 
@@ -563,6 +566,18 @@ def _open_demo_view(view: str, payment_id: str | None = None) -> None:
         st.session_state["investigation_payment_id"] = payment_id
 
 
+def _sync_csv_upload_state() -> None:
+    """Discard scored results as soon as the selected CSV changes."""
+    if "csv_tester_upload" not in st.session_state:
+        return
+    uploaded = st.session_state.get("csv_tester_upload")
+    current_file_id = getattr(uploaded, "file_id", None)
+    cached = st.session_state.get("csv_tester_results")
+    if cached and cached.get("file_id") != current_file_id:
+        st.session_state.pop("csv_tester_results", None)
+        st.session_state.pop("csv_tester_active", None)
+
+
 def render_mock_demo_guide(transactions: pd.DataFrame) -> None:
     """Show a deterministic, end-to-end tour of every mock-only demo case."""
     if transactions.empty:
@@ -707,28 +722,82 @@ def _render_fraud_parameters_panel(
     filtered: pd.DataFrame,
     *,
     signal_importance: dict[str, float] | None = None,
+    signal_support: dict[str, float] | None = None,
+    upload_active: bool = False,
+    upload_pending: bool = False,
+    upload_filename: str | None = None,
+    upload_row_count: int | None = None,
+    upload_flagged_count: int | None = None,
+    decision_threshold: float | None = None,
 ) -> None:
     """Full-width panel: measured SHAP signal influence for the active dataset."""
     with st.container(border=True):
         st.markdown('<span class="explorer-panel-anchor"></span>', unsafe_allow_html=True)
+        title = "Model signal influence" if upload_active else "Fraud detection parameters"
         st.markdown(
-            '<div class="explorer-panel-title">:material/tune: Fraud detection parameters</div>',
+            f'<div class="explorer-panel-title">:material/tune: {title}</div>',
             unsafe_allow_html=True,
         )
+        if upload_pending:
+            st.info("Run the model to calculate signal influence for this CSV.")
+            return
+        if upload_active and not isinstance(signal_importance, dict):
+            st.info("Dataset signal influence is unavailable for this scored CSV.")
+            return
+        if upload_active and not isinstance(signal_support, dict):
+            st.info("Dataset signal coverage is unavailable for this scored CSV.")
+            return
         caption = (
-            "Mean absolute SHAP influence calculated from the uploaded transactions."
-            if signal_importance
+            "Mean absolute SHAP influence from the trained XGBoost model on this uploaded CSV."
+            if upload_active
             else "Real mean absolute SHAP signal importance from the held-out test set — read-only."
         )
         st.markdown(f'<div class="explorer-panel-caption">{caption}</div>', unsafe_allow_html=True)
+        if upload_active:
+            row_count = int(upload_row_count) if upload_row_count is not None else len(filtered)
+            flagged_count = (
+                int(upload_flagged_count) if upload_flagged_count is not None else None
+            )
+            metadata = [
+                f"Dataset: {str(upload_filename or 'uploaded CSV')}",
+                f"{row_count:,} rows scored",
+            ]
+            if flagged_count is not None:
+                metadata.append(f"{flagged_count:,} flagged")
+            if decision_threshold is not None:
+                metadata.append(f"review threshold {float(decision_threshold):.3f}")
+            st.caption(" · ".join(metadata))
         try:
-            importance_values = signal_importance or load_global_importance(
-                GLOBAL_IMPORTANCE_PATH
-            )["signal_importance_percent"]
+            importance_values = (
+                signal_importance
+                if upload_active
+                else load_global_importance(GLOBAL_IMPORTANCE_PATH)["signal_importance_percent"]
+            )
+            if not importance_values:
+                st.info("Dataset signal influence is unavailable for this scored CSV.")
+                return
+            if upload_active:
+                top_signal, top_percent = max(
+                    importance_values.items(), key=lambda item: float(item[1])
+                )
+                st.markdown(
+                    f"**Top model driver:** {escape(str(top_signal))} · "
+                    f"{float(top_percent):.1f}% of total mean absolute SHAP influence"
+                )
+            def importance_row(signal: str, percent: float) -> str:
+                coverage = (
+                    f'<small>Contributed in {float(signal_support.get(signal, 0.0)):.1f}% of scored rows</small>'
+                    if upload_active else ""
+                )
+                return (
+                    f'<div class="importance-row"><div class="importance-signal">'
+                    f'<span>{escape(str(signal))}</span>{coverage}</div>'
+                    f'<div class="importance-track"><div class="importance-fill" style="width:{percent}%"></div></div>'
+                    f'<strong>{percent:.1f}%</strong></div>'
+                )
+
             rows = "".join(
-                f'<div class="importance-row"><span>{signal}</span>'
-                f'<div class="importance-track"><div class="importance-fill" style="width:{percent}%"></div></div>'
-                f'<strong>{percent:.1f}%</strong></div>'
+                importance_row(str(signal), float(percent))
                 for signal, percent in importance_values.items()
             )
             st.markdown(f'<div class="importance-panel">{rows}</div>', unsafe_allow_html=True)
@@ -738,8 +807,10 @@ def _render_fraud_parameters_panel(
 
 def render_transactions_view(transactions: pd.DataFrame, *, is_mock: bool) -> None:
     st.markdown('<span class="transaction-explorer-route-label">Transaction explorer</span>', unsafe_allow_html=True)
+    _sync_csv_upload_state()
     upload_result = st.session_state.get("csv_tester_results")
     using_upload = bool(upload_result and st.session_state.get("csv_tester_active"))
+    upload_pending = st.session_state.get("csv_tester_upload") is not None and not using_upload
     if using_upload:
         transactions = uploaded_scores_to_dashboard_transactions(
             upload_result["scored"],
@@ -900,6 +971,18 @@ def render_transactions_view(transactions: pd.DataFrame, *, is_mock: bool) -> No
             filtered,
             signal_importance=(upload_result or {}).get("signal_importance_percent")
             if using_upload else None,
+            signal_support=(upload_result or {}).get("signal_support_percent")
+            if using_upload else None,
+            upload_active=using_upload,
+            upload_pending=upload_pending,
+            upload_filename=(upload_result or {}).get("filename") if using_upload else None,
+            upload_row_count=(upload_result or {}).get("row_count") if using_upload else None,
+            upload_flagged_count=(
+                int(upload_result["scored"]["flagged"].astype(bool).sum())
+                if using_upload else None
+            ),
+            decision_threshold=(upload_result or {}).get("decision_threshold")
+            if using_upload else None,
         )
     else:
         st.caption("Fraud detection parameters are available in the synthetic demo.")
@@ -959,7 +1042,7 @@ def render_transactions_view(transactions: pd.DataFrame, *, is_mock: bool) -> No
             styles = []
             for column in row.index:
                 if column == "Risk score":
-                    styles.append(f"color:{color}; font-weight:700;")
+                    styles.append(f"color:{color}; font-weight:600;")
                 elif column == "Status":
                     styles.append(
                         f"color:{color}; background-color:{bg}; border-radius:999px; "
@@ -1014,6 +1097,7 @@ def render_transactions_view(transactions: pd.DataFrame, *, is_mock: bool) -> No
 
 def active_transaction_dataset(transactions: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
     """Return the uploaded scored dataset when it is the active review source."""
+    _sync_csv_upload_state()
     upload_result = st.session_state.get("csv_tester_results")
     if upload_result and st.session_state.get("csv_tester_active"):
         return uploaded_scores_to_dashboard_transactions(
@@ -1234,7 +1318,7 @@ def _render_overview_infographic(transactions: pd.DataFrame, alerts: pd.DataFram
         html,
         body {{
           margin: 0;
-          background: #ffffff;
+          background: transparent;
         }}
         .overview-reference {{
           margin: 0;
@@ -2057,21 +2141,79 @@ def _render_csv_batch_tester() -> None:
             r1.metric("Transactions scored", f"{len(scored):,}")
             r2.metric("Flagged by the model", f"{flagged:,}")
             r3.metric("Flag rate", f"{flag_rate:.1%}")
+
+            def result_series(column: str, default: object = None) -> pd.Series:
+                if column in scored.columns:
+                    return scored[column]
+                return pd.Series([default] * len(scored), index=scored.index)
+
+            currency = result_series("currency", "INR").fillna("INR").astype(str).str.upper()
+            amount = pd.to_numeric(result_series("amount"), errors="coerce")
+            velocity = pd.to_numeric(result_series("velocity"), errors="coerce")
+            if velocity.isna().all():
+                velocity = pd.to_numeric(result_series("card_txn_count_1h"), errors="coerce")
+            ip_billing = result_series("ip_billing")
+            computed_ip_billing = result_series("geo_mismatch").map(
+                {1.0: "Mismatch", 0.0: "Match", True: "Mismatch", False: "Match"}
+            )
+            ip_billing = ip_billing.where(ip_billing.notna(), computed_ip_billing).fillna("—")
+            device = result_series("device")
+            computed_device = result_series("is_new_device").map(
+                {1.0: "New", 0.0: "Known", True: "New", False: "Known"}
+            )
+            device = device.where(device.notna(), computed_device).fillna("—")
+            amount_deviation = pd.to_numeric(
+                result_series("amount_deviation"), errors="coerce"
+            )
+            if amount_deviation.isna().all():
+                amount_deviation = pd.to_numeric(
+                    result_series("user_amount_zscore"), errors="coerce"
+                )
+            hour = pd.to_numeric(result_series("hour"), errors="coerce")
+            if hour.isna().all():
+                hour = pd.to_datetime(result_series("timestamp"), utc=True, errors="coerce").dt.hour
+            timestamp = pd.to_datetime(
+                result_series("timestamp"), utc=True, errors="coerce"
+            ).dt.strftime("%d %b %Y, %H:%M")
+            status = result_series("status").where(
+                result_series("status").notna(),
+                scored["flagged"].map({True: "Flagged", False: "Not flagged"}),
+            )
+            actual = result_series("actual").fillna("—")
             display = pd.DataFrame({
-                "Transaction ID": scored["transaction_id"],
-                "Timestamp": pd.to_datetime(scored["timestamp"]).dt.strftime("%d %b %Y, %H:%M"),
-                "Amount": scored["amount"],
+                "Txn": scored["transaction_id"],
+                "Timestamp": timestamp,
+                "Amount (₹)": [
+                    f"{'₹' if code == 'INR' else code + ' '}{value:,.2f}"
+                    if pd.notna(value) else "—"
+                    for code, value in zip(currency, amount, strict=True)
+                ],
+                "Velocity": velocity.round(2),
+                "IP/billing": ip_billing,
+                "Device": device,
+                "Amt. dev.": amount_deviation.round(2),
+                "Hour": hour.round().astype("Int64"),
                 "Score": scored["score"].astype(float),
-                "Flagged": scored["flagged"].map({True: "Flagged", False: "Not flagged"}),
+                "Status": status,
+                "Actual": actual,
                 "Reasons": scored["reasons"].map(
                     lambda items: "; ".join(items) if isinstance(items, list) else str(items)
                 ),
             })
+            st.caption(
+                "Velocity, IP/billing, device, amount deviation, hour, score, and status come from the "
+                "backend scoring response. Actual is shown only when the uploaded CSV includes a label."
+            )
             st.dataframe(
                 display, use_container_width=True, hide_index=True,
-                column_config={"Score": st.column_config.ProgressColumn(
-                    "Score", min_value=0.0, max_value=1.0, format="%.3f"
-                )},
+                column_config={
+                    "Velocity": st.column_config.NumberColumn("Velocity", format="%.2f"),
+                    "Amt. dev.": st.column_config.NumberColumn("Amt. dev.", format="%.2f"),
+                    "Hour": st.column_config.NumberColumn("Hour", format="%02d"),
+                    "Score": st.column_config.ProgressColumn(
+                        "Score", min_value=0.0, max_value=1.0, format="%.3f"
+                    ),
+                },
             )
             st.download_button(
                 "Download scored results", csv_injection_safe(display).to_csv(index=False),
@@ -2079,106 +2221,191 @@ def _render_csv_batch_tester() -> None:
             )
 
 
-def render_case_management() -> None:
-    """Render the analyst case-management workbench used in the demo."""
+def render_case_management(transactions: pd.DataFrame) -> None:
+    """Analyst case-management workbench, backed by the real case-store API.
+
+    Cases live in fraud_cases/fraud_case_notes (backend/src/case_store.py) keyed
+    only by transaction_id, status, risk_score, and timestamps — there is no
+    customer/amount/priority field there. Those columns are enriched here by
+    joining against whichever transactions are currently loaded (mock demo data
+    or a connected Razorpay Test Mode account), the same dataset Transaction
+    explorer/investigation use, so a case looks up its own transaction's details
+    rather than duplicating them.
+    """
     st.markdown('<span class="case-management-route-label">Case management</span>', unsafe_allow_html=True)
-    cases = [
-        ("CASE-1001", "TXN728391", "Rahul Mehta", "25,000", "98", "High", "Open", "-", "Sep 03, 10:24 AM"),
-        ("CASE-1002", "TXN728392", "Sneha Kapoor", "18,500", "92", "High", "Open", "Amit Kumar", "Sep 03, 10:37 AM"),
-        ("CASE-1003", "TXN728394", "Vikram Singh", "32,000", "88", "Medium", "In Progress", "Priya Sharma", "Sep 03, 11:02 AM"),
-        ("CASE-1004", "TXN728395", "Ananya Reddy", "12,750", "76", "Medium", "Open", "-", "Sep 03, 11:20 AM"),
-        ("CASE-1005", "TXN728397", "Karan Patel", "20,300", "68", "Low", "Resolved", "Rohit Das", "Sep 03, 11:45 AM"),
-        ("CASE-1006", "TXN728398", "Pooja Nair", "2,800", "22", "Low", "Resolved", "Sneha Iyer", "Sep 03, 12:05 PM"),
-        ("CASE-1007", "TXN728399", "Arjun Shah", "5,600", "18", "Low", "Resolved", "Rohit Das", "Sep 03, 12:18 PM"),
-        ("CASE-1008", "TXN728400", "Neha Verma", "45,000", "81", "High", "In Progress", "Amit Kumar", "Sep 03, 12:30 PM"),
-        ("CASE-1009", "TXN728401", "Siddharth Iyer", "9,750", "56", "Medium", "Open", "-", "Sep 03, 01:12 PM"),
-        ("CASE-1010", "TXN728402", "Kavya Rao", "15,200", "44", "Low", "Pending Review", "Sneha Iyer", "Sep 03, 01:45 PM"),
-    ]
-    rows = "\n".join(
-        f"""
-        <tr class="{'selected' if case_id == 'CASE-1003' else ''}">
-          <td><span class="cm-check {'checked' if case_id == 'CASE-1003' else ''}">{'check' if case_id == 'CASE-1003' else ''}</span></td>
-          <td class="cm-id">{escape(case_id)}</td>
-          <td class="cm-link">{escape(txn_id)}</td>
-          <td>{escape(customer)}</td>
-          <td class="cm-link">{escape(amount)}</td>
-          <td class="cm-link">{escape(score)}</td>
-          <td><span class="cm-pill {priority.lower().replace(' ', '-')}">{escape(priority)}</span></td>
-          <td><span class="cm-pill {status.lower().replace(' ', '-')}">{escape(status)}</span></td>
-          <td class="{'cm-link' if assigned != '-' else ''}">{escape(assigned)}</td>
-          <td>{escape(created_at)}</td>
-          <td><span class="cm-dots">more_horiz</span></td>
-        </tr>
-        """
-        for case_id, txn_id, customer, amount, score, priority, status, assigned, created_at in cases
+    render_page_header(
+        "Case Management",
+        "View, investigate, and resolve fraud cases. Track status, assign ownership, and take action.",
     )
+    try:
+        cases = list_fraud_cases(SCORING_API_URL)
+    except ScoringAPIError as exc:
+        st.warning(f"Case storage unavailable: {exc}")
+        return
+    if not cases:
+        st.info(
+            "No cases have been opened yet. Marking a transaction under investigation, "
+            "confirmed fraud, or a false positive from Transaction investigation opens one here."
+        )
+        return
+
+    cases_df = pd.DataFrame(cases)
+    cases_df["created_at"] = pd.to_datetime(cases_df["created_at"], errors="coerce", utc=True)
+    cases_df["updated_at"] = pd.to_datetime(cases_df["updated_at"], errors="coerce", utc=True)
+
+    txn_lookup = (
+        transactions.set_index("payment_id") if not transactions.empty else pd.DataFrame()
+    )
+
+    def _priority(txn_id: str, fallback_score: float | None) -> str:
+        if txn_id in txn_lookup.index:
+            return RISK_STATUS_PILL_LABELS.get(txn_lookup.loc[txn_id, "risk_status"], "—")
+        if fallback_score is None or pd.isna(fallback_score):
+            return "—"
+        if fallback_score >= DEMO_BLOCKING_THRESHOLD:
+            return "Flagged"
+        if fallback_score >= DEMO_REVIEW_THRESHOLD:
+            return "Review"
+        return "Legit"
+
+    cases_df["priority"] = [
+        _priority(txn_id, score)
+        for txn_id, score in zip(cases_df["transaction_id"], cases_df["risk_score"])
+    ]
+    cases_df["customer"] = cases_df["transaction_id"].map(
+        lambda txn_id: (
+            (str(txn_lookup.loc[txn_id, "email"]) or str(txn_lookup.loc[txn_id, "contact"]))
+            if txn_id in txn_lookup.index else "—"
+        )
+    )
+    cases_df["amount_label"] = cases_df["transaction_id"].map(
+        lambda txn_id: (
+            f"{txn_lookup.loc[txn_id, 'currency']} {txn_lookup.loc[txn_id, 'amount']:,.2f}"
+            if txn_id in txn_lookup.index else "—"
+        )
+    )
+
+    total = len(cases_df)
+    open_count = int((cases_df["status"] == "open").sum())
+    resolved_mask = cases_df["status"].isin(["confirmed_fraud", "false_positive"])
+    resolved_count = int(resolved_mask.sum())
+    resolved_deltas = (
+        cases_df.loc[resolved_mask, "updated_at"] - cases_df.loc[resolved_mask, "created_at"]
+    ).dropna()
+    if not resolved_deltas.empty:
+        avg_seconds = resolved_deltas.dt.total_seconds().mean()
+        hours, minutes = divmod(int(avg_seconds // 60), 60)
+        avg_label = f"{hours}h {minutes}m" if hours else f"{minutes}m"
+    else:
+        avg_label = "—"
+
     st.markdown(
-        f"""
-        <div class="case-management-reference">
-          <span class="topnav-state-text">Case management</span>
-          <section class="cm-main">
-            <div class="cm-title">
-              <h1>Case Management</h1>
-              <p>View, investigate, and resolve fraud cases. Track status, assign ownership, and take action.</p>
-            </div>
-            <div class="cm-metrics">
-              <div class="cm-metric"><span class="cm-metric-icon blue">folder</span><div><small>Total Cases</small><strong>248</strong><em class="up"><span class="cm-trend-icon">arrow_upward</span>12%</em><span>vs. last 7 days</span></div></div>
-              <div class="cm-metric"><span class="cm-metric-icon red">warning</span><div><small>Open Cases</small><strong>73</strong><em class="down"><span class="cm-trend-icon">arrow_downward</span>8%</em><span>vs. last 7 days</span></div></div>
-              <div class="cm-metric"><span class="cm-metric-icon green">check_circle</span><div><small>Resolved Cases</small><strong>162</strong><em class="up"><span class="cm-trend-icon">arrow_upward</span>18%</em><span>vs. last 7 days</span></div></div>
-              <div class="cm-metric"><span class="cm-metric-icon purple">schedule</span><div><small>Avg. Resolution Time</small><strong>2h 34m</strong><em class="up"><span class="cm-trend-icon">arrow_downward</span>22%</em><span>vs. last 7 days</span></div></div>
-            </div>
-            <div class="cm-filter-card">
-              <div><label>Date Range</label><button><span>calendar_today</span>Last 7 days<i>expand_more</i></button></div>
-              <div><label>Case Status</label><button>All Statuses<i>expand_more</i></button></div>
-              <div><label>Priority</label><button>All Priorities<i>expand_more</i></button></div>
-              <div><label>Assigned To</label><button>All Users<i>expand_more</i></button></div>
-              <a>Reset</a>
-              <button class="cm-apply">Apply Filters</button>
-            </div>
-            <div class="cm-table-card">
-              <div class="cm-table-head"><h2>Cases (248)</h2><button><span>download</span>Export</button></div>
-              <div class="cm-table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th><span class="cm-check"></span></th><th>Case ID</th><th>Transaction ID</th><th>Customer Name</th><th>Amount (₹)</th><th>Risk Score</th><th>Priority</th><th>Status</th><th>Assigned To</th><th>Created At</th><th>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>{rows}</tbody>
-                </table>
-              </div>
-              <div class="cm-pagination"><span>Showing 1-10 of 248 cases</span><div><button>chevron_left</button><button class="active">1</button><button>2</button><button>3</button><button>4</button><button>5</button><button>...</button><button>25</button><button>chevron_right</button></div></div>
-            </div>
-          </section>
-          <aside class="cm-detail">
-            <div class="cm-detail-card">
-              <div class="cm-detail-head"><h2>CASE-1003</h2><span class="cm-pill high">High Priority</span><button>close</button></div>
-              <div class="cm-hero">
-                <span class="cm-avatar">smartphone</span>
-                <div><small>Transaction ID</small><strong>TXN728394</strong></div>
-                <div><small>Amount</small><strong>₹ 32,000</strong></div>
-                <div><small>Risk Score</small><strong class="risk">88 / 100</strong></div>
-              </div>
-              <div class="cm-customer"><span class="cm-avatar">person</span><div><small>Customer</small><strong>Vikram Singh</strong><p>Customer ID: CUST98123</p></div><a>View Profile</a></div>
-              <div class="cm-timegrid">
-                <div><span>alarm</span><small>Created At</small><strong>Sep 03, 2024, 11:02 AM</strong></div>
-                <div><span>calendar_today</span><small>Last Updated</small><strong>Sep 03, 2024, 01:20 PM</strong></div>
-                <div><span>group</span><small>Assigned To</small><strong>Priya Sharma</strong></div>
-              </div>
-              <div class="cm-tabs"><span class="active">Overview</span><span>Investigation</span><span>Activity Log</span><span>Related Cases</span></div>
-              <div class="cm-overview-grid">
-                <section class="cm-box"><h3>Case Details</h3><dl><dt>Case ID</dt><dd>CASE-1003</dd><dt>Transaction ID</dt><dd class="cm-link">TXN728394</dd><dt>Status</dt><dd><span class="cm-pill in-progress">In Progress</span></dd><dt>Priority</dt><dd><span class="cm-pill medium">Medium</span></dd><dt>Case Type</dt><dd>Card Not Present (CNP)</dd><dt>Reason</dt><dd>Unusual transaction<br>pattern</dd><dt>Created At</dt><dd>Sep 03, 2024, 11:02 AM</dd><dt>Last Updated</dt><dd>Sep 03, 2024, 01:20 PM</dd></dl></section>
-                <section class="cm-box risk-factors"><h3>Risk Factors</h3><div><span>Transaction Amount</span><b>25%</b><em class="cm-pill high">High</em></div><div><span>Location Anomaly</span><b>20%</b><em class="cm-pill high">High</em></div><div><span>Device Anomaly</span><b>15%</b><em class="cm-pill medium">Medium</em></div><div><span>Customer Behavior</span><b>10%</b><em class="cm-pill medium">Medium</em></div><div><span>Time of Transaction</span><b>10%</b><em class="cm-pill low">Low</em></div><div><span>Payment Method Risk</span><b>10%</b><em class="cm-pill low">Low</em></div><div class="total"><span>Total Risk Score</span><strong>88 / 100</strong></div></section>
-              </div>
-              <section class="cm-box cm-summary"><h3>Transaction Summary</h3><div class="summary-grid"><dl><dt>Merchant</dt><dd>Global Electronics</dd><dt>Location</dt><dd>Bengaluru, India</dd><dt>Channel</dt><dd>Web</dd><dt>Payment Method</dt><dd>Credit Card (•••• 4582)</dd><dt>Device</dt><dd>Windows / Chrome</dd></dl><div class="cm-map"><span>location_on</span><div><b>location_on</b> Bengaluru, India <a>View on Map</a></div></div></div></section>
-              <section class="cm-box cm-notes"><h3>Notes</h3><div class="cm-note-input">Add a note about this case...<button>Add Note</button></div><div class="cm-note"><b>PP</b><p><strong>Poojitha</strong><small>Sep 03, 2024, 01:20 PM</small><br>Customer contacted. Awaiting additional documents for verification.</p></div><div class="cm-note"><b>PS</b><p><strong>Priya Sharma</strong><small>Sep 03, 2024, 12:45 PM</small><br>Reviewed transaction pattern. Appears to be genuine per customer context.</p></div></section>
-              <div class="cm-actions"><button><span>download</span>Escalate</button><button><span>person_add</span>Assign</button><button><span>home</span>Mark as Resolved</button><button class="primary"><span>bolt</span>Take Action</button></div>
-            </div>
-          </aside>
-        </div>
-        """,
+        '<div class="cm-metrics">'
+        f'<div class="cm-metric"><span class="cm-metric-icon blue">folder</span>'
+        f'<div><small>Total cases</small><strong>{total:,}</strong></div></div>'
+        f'<div class="cm-metric"><span class="cm-metric-icon red">warning</span>'
+        f'<div><small>Open cases</small><strong>{open_count:,}</strong></div></div>'
+        f'<div class="cm-metric"><span class="cm-metric-icon green">check_circle</span>'
+        f'<div><small>Resolved cases</small><strong>{resolved_count:,}</strong></div></div>'
+        f'<div class="cm-metric"><span class="cm-metric-icon purple">schedule</span>'
+        f'<div><small>Avg. resolution time</small><strong>{avg_label}</strong></div></div>'
+        '</div>',
         unsafe_allow_html=True,
     )
+
+    filter_cols = st.columns(4)
+    with filter_cols[0]:
+        status_filter = st.multiselect(
+            "Status", list(CASE_STATUS_LABELS.values()), key="cm_filter_status",
+        )
+    with filter_cols[1]:
+        priority_filter = st.multiselect(
+            "Priority", ["Flagged", "Review", "Legit"], key="cm_filter_priority",
+        )
+    with filter_cols[2]:
+        assignee_options = sorted(v for v in cases_df["updated_by"].dropna().unique() if v)
+        assignee_filter = st.multiselect("Assigned to", assignee_options, key="cm_filter_assignee")
+    with filter_cols[3]:
+        search = st.text_input(
+            "Search", placeholder="Transaction ID, customer…", key="cm_filter_search",
+        )
+
+    filtered = cases_df.reset_index(drop=True)
+    if status_filter:
+        keys = {key for key, label in CASE_STATUS_LABELS.items() if label in status_filter}
+        filtered = filtered[filtered["status"].isin(keys)]
+    if priority_filter:
+        filtered = filtered[filtered["priority"].isin(priority_filter)]
+    if assignee_filter:
+        filtered = filtered[filtered["updated_by"].isin(assignee_filter)]
+    if search:
+        needle = search.strip().lower()
+        filtered = filtered[
+            filtered["transaction_id"].str.lower().str.contains(needle, na=False)
+            | filtered["customer"].str.lower().str.contains(needle, na=False)
+        ]
+    filtered = filtered.reset_index(drop=True)
+
+    list_col, detail_col = st.columns([2.1, 1.15], gap="large")
+    with list_col:
+        st.markdown(f"#### Cases ({len(filtered)})")
+        if filtered.empty:
+            st.info("No cases match these filters.")
+        else:
+            display = pd.DataFrame({
+                "Transaction ID": filtered["transaction_id"],
+                "Customer": filtered["customer"],
+                "Amount": filtered["amount_label"],
+                "Risk score": filtered["risk_score"],
+                "Priority": filtered["priority"],
+                "Status": filtered["status"].map(CASE_STATUS_LABELS),
+                "Assigned to": filtered["updated_by"].fillna("Unassigned"),
+                "Updated": filtered["updated_at"],
+            })
+            event = st.dataframe(
+                display,
+                hide_index=True,
+                use_container_width=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="cm_case_table",
+                column_config={
+                    "Risk score": st.column_config.ProgressColumn(min_value=0.0, max_value=1.0, format="%.2f"),
+                    "Updated": st.column_config.DatetimeColumn(format="D MMM, h:mm a"),
+                },
+            )
+            selected_rows = event.selection.rows if event and event.selection else []
+            if selected_rows:
+                st.session_state["cm_selected_case"] = filtered.iloc[selected_rows[0]]["transaction_id"]
+            elif "cm_selected_case" not in st.session_state:
+                st.session_state["cm_selected_case"] = filtered.iloc[0]["transaction_id"]
+
+    with detail_col:
+        selected_id = st.session_state.get("cm_selected_case")
+        if not selected_id or selected_id not in filtered["transaction_id"].values:
+            st.info("Select a case from the list to inspect it.")
+        else:
+            case_row = cases_df.loc[cases_df["transaction_id"] == selected_id].iloc[0]
+            case, notes = _fetch_case(selected_id)
+            with st.container(border=True):
+                st.markdown(f"##### {escape(selected_id)}")
+                st.caption(
+                    f"Priority: {case_row['priority']} · "
+                    f"{CASE_STATUS_LABELS.get(case_row['status'], case_row['status'])}"
+                )
+                if selected_id in txn_lookup.index:
+                    txn_row = txn_lookup.loc[selected_id]
+                    st.markdown(
+                        f"**Amount:** {txn_row['currency']} {txn_row['amount']:,.2f}  \n"
+                        f"**Customer:** {escape(str(txn_row.get('email') or txn_row.get('contact') or '—'))}  \n"
+                        f"**Method:** {escape(str(txn_row.get('method', '—')))}"
+                    )
+                fallback_row = pd.Series({
+                    "payment_id": selected_id,
+                    "risk_score": case_row.get("risk_score", float("nan")),
+                })
+                _render_case_status_bar(fallback_row, case)
+                _render_investigation_notes_panel(selected_id, notes)
 
 
 if "razorpay_connection" not in st.session_state:
@@ -2301,7 +2528,8 @@ with bell_col:
         unsafe_allow_html=True,
     )
     st.button(
-        ":material/notifications:",
+        "",
+        icon=":material/notifications:",
         key="topbar_bell", help="Flagged transactions in the loaded window",
         on_click=_open_demo_view, args=("Overview",),
     )
@@ -2337,7 +2565,8 @@ if view == "Overview":
     st.markdown('<div class="overview-content-spacer"></div>', unsafe_allow_html=True)
     render_overview(transactions, connection=connection, is_mock_session=is_mock_session)
 elif view == "Case management":
-    render_case_management()
+    transactions = load_dashboard_transactions(show_date_filter=False)
+    render_case_management(transactions)
 else:
     transactions = load_dashboard_transactions(show_date_filter=view == "Transaction explorer")
     if transactions.empty:

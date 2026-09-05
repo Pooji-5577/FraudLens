@@ -56,11 +56,32 @@ def group_and_normalize(mean_abs_shap: pd.Series) -> dict[str, float]:
 
 def compute_featured_importance(featured: pd.DataFrame, explanation_model) -> dict[str, float]:
     """Return grouped mean absolute SHAP influence for a scored dataset."""
+    return compute_featured_importance_details(featured, explanation_model)[
+        "signal_importance_percent"
+    ]
+
+
+def compute_featured_importance_details(featured: pd.DataFrame, explanation_model) -> dict:
+    """Return SHAP influence and row coverage for each signal group."""
     if featured.empty:
-        return {name: 0.0 for name in SIGNAL_GROUPS}
+        empty = {name: 0.0 for name in SIGNAL_GROUPS}
+        return {
+            "signal_importance_percent": empty,
+            "signal_support_percent": empty.copy(),
+        }
     contributions = shap_contributions(explanation_model, model_matrix(featured))
-    mean_abs = pd.Series(np.abs(contributions).mean(axis=0), index=MODEL_FEATURES)
-    return group_and_normalize(mean_abs)
+    absolute = np.abs(contributions)
+    mean_abs = pd.Series(absolute.mean(axis=0), index=MODEL_FEATURES)
+    importance = group_and_normalize(mean_abs)
+    support = {}
+    feature_indexes = {feature: index for index, feature in enumerate(MODEL_FEATURES)}
+    for signal, features in SIGNAL_GROUPS.items():
+        group_mass = absolute[:, [feature_indexes[feature] for feature in features]].sum(axis=1)
+        support[signal] = round(100 * float(np.count_nonzero(group_mass > 1e-12)) / len(featured), 1)
+    return {
+        "signal_importance_percent": importance,
+        "signal_support_percent": support,
+    }
 
 
 def compute_global_importance(

@@ -20,4 +20,6 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run tests
-        run: pytest -q
+        # Running pytest as a module keeps the checkout root on sys.path, so
+        # the repository's backend and frontend packages can be imported.
+        run: python -m pytest -q

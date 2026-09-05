@@ -8,11 +8,11 @@ from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 import pandas as pd
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from dotenv import load_dotenv
 
 from backend.src.score import FraudScorer
-from backend.src.global_importance import compute_featured_importance
+from backend.src.global_importance import compute_featured_importance_details
 from backend.src.case_store import CaseStore
 from backend.src.dataset_store import DatasetStore
 from backend.src.razorpay_enforcement import ReviewStore, verify_webhook_signature
@@ -48,6 +48,15 @@ class Transaction(BaseModel):
     merchant_category: str
     uploaded_velocity_per_hour: float | None = Field(default=None, ge=0)
     ip_address: str | None = None
+    # Optional upload/display parameters. They never replace the model's
+    # point-in-time feature calculations, but let labelled or pre-enriched CSV
+    # rows carry their reviewer-facing values through the API.
+    velocity: float | None = Field(default=None, ge=0)
+    ip_billing: str | None = None
+    device: str | None = None
+    amount_deviation: float | None = None
+    hour: int | None = Field(default=None, ge=0, le=23)
+    actual: str | None = None
 
 
 class ScoreResponse(BaseModel):
@@ -56,6 +65,27 @@ class ScoreResponse(BaseModel):
     blocked: bool
     reasons: list[str]
     report: dict[str, Any] | None = None
+
+
+class ScoreResultResponse(BaseModel):
+    """A batch result with the model inputs/signals reviewers need to inspect."""
+
+    model_config = ConfigDict(extra="allow")
+
+    transaction_id: str
+    timestamp: datetime
+    amount: float
+    velocity: float
+    ip_billing: str
+    device: str
+    amount_deviation: float
+    hour: int
+    score: float
+    flagged: bool
+    blocked: bool
+    status: str
+    actual: str | None = None
+    reasons: list[str]
 
 
 class ChatMessage(BaseModel):
@@ -86,10 +116,11 @@ class DatasetScoreResponse(BaseModel):
     dataset_id: str | None
     filename: str
     row_count: int
-    results: list[dict[str, Any]]
+    results: list[ScoreResultResponse]
     storage_status: Literal["saved", "unavailable"]
     storage_error: str | None = None
     signal_importance_percent: dict[str, float]
+    signal_support_percent: dict[str, float]
     decision_threshold: float
 
 
@@ -137,14 +168,25 @@ def _score_results(scored: pd.DataFrame) -> list[dict[str, Any]]:
         "billing_country", "ip_country", "merchant_category", "uploaded_velocity_per_hour",
         "ip_address", "card_txn_count_1h", "device_txn_count_1h", "card_txn_count_24h",
         "device_txn_count_24h", "geo_mismatch", "is_new_device", "user_amount_zscore",
-        "amount_to_user_mean_ratio", "score", "flagged", "blocked", "reasons",
+        "amount_to_user_mean_ratio", "velocity", "ip_billing", "device", "amount_deviation",
+        "hour", "score", "flagged", "blocked", "status", "actual", "reasons",
     ]
     available_columns = [column for column in display_columns if column in scored.columns]
     records = scored[available_columns].to_dict(orient="records")
     for record in records:
-        timestamp = record.get("timestamp")
-        if hasattr(timestamp, "isoformat"):
-            record["timestamp"] = timestamp.isoformat()
+        for key, value in list(record.items()):
+            if hasattr(value, "isoformat"):
+                record[key] = value.isoformat()
+            elif value is pd.NA:
+                record[key] = None
+            elif not isinstance(value, (list, dict)):
+                try:
+                    if bool(pd.isna(value)):
+                        record[key] = None
+                    elif hasattr(value, "item"):
+                        record[key] = value.item()
+                except (TypeError, ValueError):
+                    pass
     return records
 
 
@@ -221,7 +263,7 @@ def score(transaction: Transaction, include_report: bool = False) -> dict:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.post("/score/batch", response_model=list[ScoreResponse])
+@app.post("/score/batch", response_model=list[ScoreResultResponse])
 def score_batch(transactions: list[Transaction]) -> list[dict]:
     """Score an independent chronological upload with point-in-time features."""
     if not transactions:
@@ -253,6 +295,7 @@ def score_and_store_dataset(request: DatasetScoreRequest) -> dict[str, Any]:
     except SupabaseStoreError as exc:
         storage_status = "unavailable"
         storage_error = str(exc)
+    importance = compute_featured_importance_details(scored, scorer.explanation_model)
     return {
         "dataset_id": dataset_id,
         "filename": request.filename,
@@ -260,9 +303,7 @@ def score_and_store_dataset(request: DatasetScoreRequest) -> dict[str, Any]:
         "results": _score_results(scored),
         "storage_status": storage_status,
         "storage_error": storage_error,
-        "signal_importance_percent": compute_featured_importance(
-            scored, scorer.explanation_model
-        ),
+        **importance,
         "decision_threshold": scorer.threshold,
     }
 

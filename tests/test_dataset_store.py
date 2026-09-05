@@ -67,3 +67,35 @@ def test_dataset_store_persists_metadata_rows_and_completion():
     assert saved_row["reasons"] == ["Billing country IN, but IP country RU"]
     assert http.calls[2]["params"] == {"id": f"eq.{dataset_id}"}
     assert http.calls[2]["json"]["status"] == "completed"
+
+
+def test_dataset_store_persists_reviewer_parameters():
+    http = FakeHTTPClient([FakeResponse(), FakeResponse(), FakeResponse(status_code=204)])
+    store = DatasetStore("https://example.supabase.co", "server-secret", http_client=http)
+    scored = _scored_frame().assign(
+        velocity=[3.0],
+        ip_billing=["Mismatch"],
+        device=["New"],
+        amount_deviation=[1.75],
+        hour=[10],
+        status=["Flagged"],
+        actual=["Fraud"],
+    )
+
+    store.save_scored_dataset("transactions.csv", scored)
+
+    saved_row = http.calls[1]["json"][0]
+    assert {
+        key: saved_row[key]
+        for key in (
+            "velocity", "ip_billing", "device", "amount_deviation", "hour", "status", "actual"
+        )
+    } == {
+        "velocity": 3.0,
+        "ip_billing": "Mismatch",
+        "device": "New",
+        "amount_deviation": 1.75,
+        "hour": 10,
+        "status": "Flagged",
+        "actual": "Fraud",
+    }

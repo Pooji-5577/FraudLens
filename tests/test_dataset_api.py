@@ -35,6 +35,30 @@ def test_independent_batch_uploads_can_score_the_same_timestamps_twice(monkeypat
     assert len(first.json()) == len(second.json()) == 3
 
 
+def test_batch_results_include_reviewer_parameters_from_backend(monkeypatch):
+    monkeypatch.setattr(main_module, "scorer", FraudScorer())
+
+    response = TestClient(app).post(
+        "/score/batch",
+        json=[{**_transactions()[0], "actual": "Legitimate"}],
+    )
+
+    assert response.status_code == 200
+    row = response.json()[0]
+    assert {
+        "transaction_id", "amount", "velocity", "ip_billing", "device",
+        "amount_deviation", "hour", "score", "status", "actual",
+    } <= row.keys()
+    assert row["transaction_id"] == "uploaded-0"
+    assert row["amount"] == 100.0
+    assert row["hour"] == 10
+    assert row["ip_billing"] == "Match"
+    assert row["amount_deviation"] == 0.0
+    assert row["device"] == "New"
+    assert row["actual"] == "Legitimate"
+    assert row["status"] in {"Flagged", "Not flagged"}
+
+
 def test_dataset_score_endpoint_runs_model_and_persists_results(monkeypatch):
     saved = {}
 
@@ -64,6 +88,37 @@ def test_dataset_score_endpoint_runs_model_and_persists_results(monkeypatch):
     assert body["storage_error"] is None
     assert abs(sum(body["signal_importance_percent"].values()) - 100.0) < 0.2
     assert body["decision_threshold"] == main_module.scorer.threshold
+
+
+def test_dataset_signal_importance_tracks_uploaded_model_inputs(monkeypatch):
+    class FakeDatasetStore:
+        def save_scored_dataset(self, _filename, _scored):
+            return "dataset-test"
+
+    monkeypatch.setattr(main_module, "_dataset_store", lambda: FakeDatasetStore())
+    monkeypatch.setattr(main_module, "scorer", FraudScorer())
+    client = TestClient(app)
+
+    matching = client.post(
+        "/datasets/score",
+        json={"filename": "matching.csv", "transactions": _transactions()},
+    )
+    mismatching = client.post(
+        "/datasets/score",
+        json={
+            "filename": "mismatching.csv",
+            "transactions": [
+                {**transaction, "ip_country": "US"}
+                for transaction in _transactions()
+            ],
+        },
+    )
+
+    assert matching.status_code == mismatching.status_code == 200
+    matching_importance = matching.json()["signal_importance_percent"]
+    mismatching_importance = mismatching.json()["signal_importance_percent"]
+    assert matching_importance != mismatching_importance
+    assert mismatching_importance["Geography mismatch"] > matching_importance["Geography mismatch"]
 
 
 def test_dataset_score_returns_model_results_when_supabase_storage_is_unavailable(monkeypatch):

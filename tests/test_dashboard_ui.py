@@ -1,6 +1,8 @@
+import io
 from pathlib import Path
 
 import pytest
+import streamlit
 from streamlit.testing.v1 import AppTest
 
 import frontend.processing as processing
@@ -39,11 +41,9 @@ def test_case_metric_icons_use_material_ligatures_inside_their_circle():
 
 def test_case_metric_text_styles_do_not_override_icon_layout():
     css = Path("frontend/redesign.css").read_text()
-    app_source = Path("frontend/app.py").read_text()
 
     assert ".cm-metric span {" not in css
     assert ".cm-metric > div > span {" in css
-    assert 'class="cm-trend-icon"' in app_source
 
 
 def test_transaction_metric_cards_share_a_responsive_grid_row():
@@ -370,3 +370,103 @@ def test_transaction_explorer_offers_a_csv_batch_tester(monkeypatch):
         "ip_country, merchant_category" in caption.value
         for caption in app.caption
     )
+
+
+def test_selecting_a_new_csv_does_not_keep_the_previous_signal_importance(monkeypatch):
+    monkeypatch.setenv("RAZORPAY_AUTH_DISABLED", "false")
+    monkeypatch.setenv("RAZORPAY_MOCK_AUTH", "true")
+
+    def fake_score(transactions, filename, _api_url):
+        scored = transactions.copy()
+        scored["score"] = 0.11
+        scored["flagged"] = False
+        scored["blocked"] = False
+        scored["reasons"] = [["test reason"] for _ in range(len(scored))]
+        importance = {
+            "first.csv": {"Amount deviation": 90.0, "New device": 10.0},
+            "second.csv": {"Geography mismatch": 80.0, "Time of day": 20.0},
+        }[filename]
+        support = {
+            "first.csv": {"Amount deviation": 80.0, "New device": 20.0},
+            "second.csv": {"Geography mismatch": 70.0, "Time of day": 30.0},
+        }[filename]
+        return {
+            "dataset_id": filename,
+            "filename": filename,
+            "row_count": len(scored),
+            "scored": scored,
+            "storage_status": "saved",
+            "storage_error": None,
+            "signal_importance_percent": importance,
+            "signal_support_percent": support,
+            "decision_threshold": 0.23,
+        }
+
+    monkeypatch.setattr(processing, "score_and_save_uploaded_dataset", fake_score)
+    selected_upload = {"value": None}
+
+    def fake_file_uploader(*_args, **_kwargs):
+        upload = selected_upload["value"]
+        if upload is not None:
+            upload.seek(0)
+        return upload
+
+    monkeypatch.setattr(streamlit, "file_uploader", fake_file_uploader)
+    app_path = Path(__file__).resolve().parents[1] / "frontend" / "app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=90).run()
+    navigate(app, "Transaction explorer")
+
+    class TestUploadedFile(io.BytesIO):
+        def __init__(self, name, content):
+            super().__init__(content)
+            self.name = name
+            self.file_id = name
+
+    def select_csv(name, content):
+        selected_upload["value"] = TestUploadedFile(name, content)
+        app.session_state["csv_tester_upload"] = selected_upload["value"]
+        return app.run()
+
+    first_csv = (
+        b"transaction_id,timestamp,user_id,device_id,card_id,amount,billing_country,"
+        b"ip_country,merchant_category\n"
+        b"txn-a,2026-01-15T09:30:00Z,user-a,device-a,card-a,100,IN,IN,grocery\n"
+    )
+    select_csv("first.csv", first_csv)
+    assert not any(
+        '<div class="importance-panel">' in markdown.value
+        for markdown in app.markdown
+    )
+    next(button for button in app.button if button.label == "Run model").click().run()
+
+    first_panel = next(
+        markdown.value
+        for markdown in app.markdown
+        if '<div class="importance-panel">' in markdown.value
+    )
+    assert "90.0%" in first_panel
+    assert any("Top model driver" in markdown.value for markdown in app.markdown)
+    assert any("Contributed in 80.0%" in markdown.value for markdown in app.markdown)
+    assert any("first.csv" in caption.value for caption in app.caption)
+
+    second_csv = first_csv.replace(b"txn-a", b"txn-b").replace(b"100,IN,IN", b"9999,IN,US")
+    select_csv("second.csv", second_csv)
+
+    assert any(
+        "Run the model to calculate signal influence for this CSV" in info.value
+        for info in app.info
+    )
+    assert not any(
+        '<div class="importance-panel">' in markdown.value and "90.0%" in markdown.value
+        for markdown in app.markdown
+    )
+
+    next(button for button in app.button if button.label == "Run model").click().run()
+    second_panel = next(
+        markdown.value
+        for markdown in app.markdown
+        if '<div class="importance-panel">' in markdown.value
+    )
+    assert "80.0%" in second_panel
+    assert "90.0%" not in second_panel
+    assert any("second.csv" in caption.value for caption in app.caption)

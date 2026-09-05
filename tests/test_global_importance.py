@@ -1,7 +1,9 @@
+import numpy as np
 import pandas as pd
 import pytest
 
 from backend.src.features import MODEL_FEATURES
+from backend.src import global_importance
 from backend.src.global_importance import SIGNAL_GROUPS, group_and_normalize
 
 
@@ -39,3 +41,18 @@ def test_group_and_normalize_handles_all_zero_shap_without_dividing_by_zero():
     percentages = group_and_normalize(mean_abs)
 
     assert all(value == 0.0 for value in percentages.values())
+
+
+def test_compute_featured_importance_details_reports_rows_with_model_contributions(monkeypatch):
+    featured = pd.DataFrame({feature: [0.0, 0.0, 0.0] for feature in MODEL_FEATURES})
+    contributions = np.zeros((3, len(MODEL_FEATURES)))
+    contributions[0, MODEL_FEATURES.index("geo_mismatch")] = 1.0
+    contributions[1, MODEL_FEATURES.index("geo_mismatch")] = 2.0
+    contributions[1, MODEL_FEATURES.index("is_new_device")] = 1.0
+    monkeypatch.setattr(global_importance, "shap_contributions", lambda _model, _matrix: contributions)
+
+    details = global_importance.compute_featured_importance_details(featured, object())
+
+    assert details["signal_support_percent"]["Geography mismatch"] == pytest.approx(66.7)
+    assert details["signal_support_percent"]["New device"] == pytest.approx(33.3)
+    assert details["signal_support_percent"]["Amount deviation"] == 0.0

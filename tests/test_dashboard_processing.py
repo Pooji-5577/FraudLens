@@ -95,6 +95,61 @@ def test_uploaded_csv_columns_are_detected_and_missing_model_fields_are_inferred
     assert result["ignored"] == []
 
 
+def test_held_out_parameter_headers_are_carried_into_the_backend_payload():
+    raw = pd.DataFrame([
+        {
+            "Txn": "pay_clean_003",
+            "Amount (₹)": "249",
+            "Velocity": "2",
+            "IP/billing": "Mismatch",
+            "Device": "New",
+            "Amt. dev.": "1.25",
+            "Hour": "10:18 AM",
+            "Actual": "Fraud",
+        }
+    ])
+
+    result = normalize_uploaded_transactions(raw)
+    row = result["transactions"].iloc[0]
+
+    assert row["transaction_id"] == "pay_clean_003"
+    assert row["uploaded_velocity_per_hour"] == 2.0
+    assert row["ip_billing"] == "Mismatch"
+    assert row["device"] == "New"
+    assert row["amount_deviation"] == 1.25
+    assert row["hour"] == 10
+    assert row["actual"] == "Fraud"
+    assert result["ignored"] == []
+
+
+def test_table_display_headers_are_mapped_back_to_real_model_inputs():
+    raw = pd.DataFrame([
+        {
+            "Transaction ID": "pay_legit_030",
+            "Date & Time": "2026-08-17 21:52:00 UTC",
+            "User": "CUST_0018",
+            "Amount": "INR 249.00",
+            "Method": "Card",
+            "Velocity/hr": "12",
+            "Geo mismatch": "Mismatch",
+            "Risk score": "0.44",
+            "Status": "Flagged",
+            "Reasons": "Geography mismatch",
+        }
+    ])
+
+    result = normalize_uploaded_transactions(raw)
+    row = result["transactions"].iloc[0]
+
+    assert row["transaction_id"] == "pay_legit_030"
+    assert row["uploaded_velocity_per_hour"] == 12.0
+    assert row["ip_billing"] == "Mismatch"
+    assert row["ip_country"] == "EXTERNAL"
+    assert result["mapped"]["Velocity/hr"] == "uploaded_velocity_per_hour"
+    assert result["mapped"]["Geo mismatch"] == "ip_billing"
+    assert result["ignored"] == ["Risk score", "Status", "Reasons"]
+
+
 def test_uploaded_csv_can_score_with_only_an_amount_column():
     raw = pd.DataFrame({"Transaction Amount": ["1,299.50", "INR 49"]})
 
@@ -167,6 +222,15 @@ def test_uploaded_dataset_is_scored_and_saved_through_one_backend_endpoint():
                 "filename": json["filename"],
                 "row_count": len(results),
                 "results": results,
+                "signal_importance_percent": {
+                    "Amount deviation": 90.0,
+                    "New device": 10.0,
+                },
+                "signal_support_percent": {
+                    "Amount deviation": 80.0,
+                    "New device": 20.0,
+                },
+                "decision_threshold": 0.23,
             })
 
     client = DatasetClient()
@@ -185,6 +249,14 @@ def test_uploaded_dataset_is_scored_and_saved_through_one_backend_endpoint():
     assert result["scored"]["transaction_id"].tolist() == [
         "order-0", "order-1", "order-2", "order-3", "order-4"
     ]
+    assert result["signal_importance_percent"] == {
+        "Amount deviation": 90.0,
+        "New device": 10.0,
+    }
+    assert result["signal_support_percent"] == {
+        "Amount deviation": 80.0,
+        "New device": 20.0,
+    }
 
 
 def test_scored_upload_becomes_dashboard_transaction_data():

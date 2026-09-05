@@ -18,6 +18,12 @@ scores become the active source for the transaction table, summary cards, and si
 When Supabase storage is available the rows are saved there; if migrations are missing, the
 UI still shows the model results and marks database saving as pending.
 
+The scored-results table exposes backend parameters for velocity, IP/billing geography,
+device history, amount deviation, hour, model status, and an optional `Actual` label.
+Uploads can use friendly headers such as `Txn`, `IP/billing`, `Amt. dev.`, `Hour`, and
+`Actual`; uploaded `Score` and `Status` values are ignored because the backend recomputes
+the model decision.
+
 The Overview page begins with **Demo every case in one session**. Its shortcuts cover low-risk,
 review-band, high-risk, false-positive, and false-negative synthetic rows; the full evidence report;
 the policy audit; grounded AI chat; and all three session-only enforcement

@@ -48,9 +48,46 @@ class DatasetStore:
 
     @staticmethod
     def _rows(dataset_id: str, scored: pd.DataFrame) -> list[dict[str, Any]]:
+        def is_missing(value: Any) -> bool:
+            if value is None or value is pd.NA:
+                return True
+            try:
+                return bool(pd.isna(value))
+            except (TypeError, ValueError):
+                return False
+
+        def optional_float(value: Any) -> float | None:
+            return None if is_missing(value) else float(value)
+
         rows: list[dict[str, Any]] = []
         for row_number, row in enumerate(scored.to_dict(orient="records"), start=1):
             timestamp = pd.Timestamp(row["timestamp"])
+            computed_velocity = max(
+                [
+                    float(row[column])
+                    for column in ("card_txn_count_1h", "device_txn_count_1h")
+                    if not is_missing(row.get(column))
+                ],
+                default=None,
+            )
+            velocity = optional_float(row.get("velocity"))
+            ip_billing = row.get("ip_billing")
+            if is_missing(ip_billing):
+                mismatch = row.get("geo_mismatch")
+                ip_billing = (
+                    "Mismatch" if bool(mismatch) else "Match"
+                    if not is_missing(mismatch) else None
+                )
+            device = row.get("device")
+            if is_missing(device):
+                new_device = row.get("is_new_device")
+                device = (
+                    "New" if bool(new_device) else "Known"
+                    if not is_missing(new_device) else None
+                )
+            status = row.get("status")
+            if is_missing(status):
+                status = "Flagged" if bool(row.get("flagged")) else "Not flagged"
             rows.append(
                 {
                     "dataset_id": dataset_id,
@@ -65,12 +102,25 @@ class DatasetStore:
                     "ip_country": str(row["ip_country"]),
                     "ip_address": None if pd.isna(row.get("ip_address")) else str(row.get("ip_address", "")),
                     "merchant_category": str(row["merchant_category"]),
-                    "uploaded_velocity_per_hour": None
-                    if pd.isna(row.get("uploaded_velocity_per_hour"))
-                    else float(row.get("uploaded_velocity_per_hour")),
+                    "uploaded_velocity_per_hour": optional_float(
+                        row.get("uploaded_velocity_per_hour")
+                    ),
+                    "velocity": velocity if velocity is not None else computed_velocity,
+                    "ip_billing": None if is_missing(ip_billing) else str(ip_billing),
+                    "device": None if is_missing(device) else str(device),
+                    "amount_deviation": optional_float(row.get("amount_deviation"))
+                    if not is_missing(row.get("amount_deviation"))
+                    else optional_float(row.get("user_amount_zscore")),
+                    "hour": int(
+                        row.get("hour")
+                        if not is_missing(row.get("hour"))
+                        else timestamp.hour
+                    ),
                     "score": float(row["score"]),
                     "flagged": bool(row["flagged"]),
                     "blocked": bool(row["blocked"]),
+                    "status": str(status),
+                    "actual": None if is_missing(row.get("actual")) else str(row.get("actual")),
                     "reasons": list(row["reasons"]),
                 }
             )
