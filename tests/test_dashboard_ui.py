@@ -58,6 +58,22 @@ def test_transaction_metric_cards_share_a_responsive_grid_row():
     assert "align-items: stretch" in metric_rule
 
 
+def test_explorer_layout_is_bounded_and_signal_rows_can_shrink():
+    css = Path("frontend/redesign.css").read_text()
+
+    block_rule = css.split(".block-container {", 1)[1].split("}", 1)[0]
+    explorer_rule = css.split(
+        ".stApp:has(.transaction-explorer-route-label) .block-container {", 1
+    )[1].split("}", 1)[0]
+    importance_rule = css.split(".importance-row {", 1)[1].split("}", 1)[0]
+
+    assert "box-sizing: border-box" in block_rule
+    assert "width: 100%" in block_rule
+    assert "max-width: min(1540px, 100%)" in explorer_rule
+    assert "minmax(0, 1fr)" in importance_rule
+    assert "@media (max-width: 1100px)" in css
+
+
 def test_dashboard_opens_directly_in_demo_mode(monkeypatch):
     monkeypatch.setenv("RAZORPAY_AUTH_DISABLED", "false")
     monkeypatch.delenv("RAZORPAY_CLIENT_ID", raising=False)

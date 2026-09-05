@@ -205,7 +205,11 @@ pre,
 }
 
 .block-container {
+  box-sizing: border-box;
+  width: 100%;
   max-width: 1120px;
+  margin-left: auto;
+  margin-right: auto;
   padding: 80px 2.5rem 4rem !important;
 }
 
@@ -1056,7 +1060,8 @@ div[data-testid="stDataFrame"] {
 
 .importance-row {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 1.6fr 72px;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr) minmax(58px, 72px);
   gap: 1rem;
   align-items: center;
   padding: 1rem 1.35rem;
@@ -1069,6 +1074,7 @@ div[data-testid="stDataFrame"] {
   min-width: 0;
   flex-direction: column;
   gap: 0.2rem;
+  overflow-wrap: anywhere;
 }
 
 .importance-signal > span {
@@ -1084,6 +1090,7 @@ div[data-testid="stDataFrame"] {
 }
 
 .importance-row strong {
+  min-width: 0;
   font-size: 1rem;
   text-align: right;
 }
@@ -1093,6 +1100,7 @@ div[data-testid="stDataFrame"] {
 }
 
 .importance-track {
+  min-width: 0;
   height: 10px;
   border-radius: 999px;
   background: var(--panel-soft);
@@ -1619,7 +1627,8 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.alert-card-review) {
 }
 
 .stApp:has(.investigation-reference-active) .block-container {
-  max-width: 1540px;
+  width: 100%;
+  max-width: min(1540px, 100%);
 }
 
 .ti-shell {
@@ -2208,11 +2217,15 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.ti-interactive-ai-anchor) [
 }
 
 .stApp:has(.transaction-explorer-route-label) .block-container {
-  max-width: 1540px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: min(1540px, 100%);
 }
 
 .stApp:has(.case-management-route-label) .block-container {
-  max-width: 1540px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: min(1540px, 100%);
   padding-left: 1.55rem !important;
   padding-right: 1.55rem !important;
 }
@@ -2425,6 +2438,10 @@ div[data-testid="stHorizontalBlock"]:has(.fraudguard-brand-lockup) div[data-test
 }
 
 div[data-testid="stVerticalBlockBorderWrapper"]:has(.filters-card-anchor) {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -3450,7 +3467,34 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.csv-tester-anchor) [data-te
 
 @media (min-width: 1480px) {
   .block-container {
-    max-width: 1540px;
+    max-width: min(1540px, 100%);
+  }
+}
+
+@media (max-width: 1100px) {
+  .stApp:has(.transaction-explorer-route-label) .block-container {
+    padding-left: 1.25rem !important;
+    padding-right: 1.25rem !important;
+  }
+
+  .stApp:has(.transaction-explorer-route-label)
+  div[data-testid="stHorizontalBlock"]:has([data-testid="stTextInput"]):has([data-testid="stMultiSelect"]) {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+  }
+
+  .stApp:has(.transaction-explorer-route-label)
+  div[data-testid="stHorizontalBlock"]:has([data-testid="stTextInput"]):has([data-testid="stMultiSelect"]) > div {
+    width: auto !important;
+    min-width: 0;
+  }
+}
+
+@media (max-width: 650px) {
+  .stApp:has(.transaction-explorer-route-label)
+  div[data-testid="stHorizontalBlock"]:has([data-testid="stTextInput"]):has([data-testid="stMultiSelect"]) {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
